@@ -103,11 +103,14 @@ def quantize_q4_0(tensor: torch.Tensor) -> bytes:
         scale_f16 = np.float16(scale)
         output.extend(struct.pack('<e', scale_f16))
 
-        # Pack pairs of 4-bit values into bytes
-        for j in range(0, Q4_BLOCK_SIZE, 2):
-            v0 = int(quantized[j]) & 0x0F
-            v1 = int(quantized[j + 1]) & 0x0F
-            byte = (v1 << 4) | v0
+        # Pack in GGML Q4_0 order: byte[i] = (element[i+16] << 4) | element[i]
+        # Low nibbles hold elements 0-15, high nibbles hold elements 16-31
+        # Values stored as offset binary: nibble = quantized_value + 8 (unsigned 0-15)
+        # Dequant: signed_value = nibble - 8
+        for j in range(16):
+            v_lo = (int(quantized[j]) + 8) & 0x0F
+            v_hi = (int(quantized[j + 16]) + 8) & 0x0F
+            byte = (v_hi << 4) | v_lo
             output.append(byte)
 
     return bytes(output)

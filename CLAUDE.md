@@ -15,7 +15,7 @@ cargo run --release --features "wgpu,cli" -- --audio test.wav
 
 # WASM (browser)
 wasm-pack build crates/stt-wasm --target web --no-default-features --features wasm
-wasm-pack build crates/mimi-wasm --target web
+wasm-pack build crates/mimi-wasm --target web --features wasm
 
 # Tests
 cargo test --features "wgpu"

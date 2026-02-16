@@ -32,7 +32,7 @@ export class SttClient {
 
         // URL configuration for embedding
         this.baseUrl = (options.baseUrl || '').replace(/\/+$/, '');
-        this.workerUrl = options.workerUrl || (this.baseUrl + '/worker.js');
+        this.workerUrl = options.workerUrl || (this.baseUrl + '/worker.js?v=' + Date.now());
         this.audioProcessorUrl = options.audioProcessorUrl || (this.baseUrl + '/audio-processor.js');
 
         // Optional overrides passed to the worker
@@ -91,14 +91,14 @@ export class SttClient {
         this.mediaStream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 channelCount: 1,
-                sampleRate: 16000,
+                sampleRate: 24000,
                 echoCancellation: true,
                 noiseSuppression: true,
             }
         });
 
-        // Create AudioContext at 16kHz (Mimi codec's expected rate)
-        this.audioContext = new AudioContext({ sampleRate: 16000 });
+        // Create AudioContext at 24kHz (Mimi codec's native rate)
+        this.audioContext = new AudioContext({ sampleRate: 24000 });
 
         // Register AudioWorklet processor
         await this.audioContext.audioWorklet.addModule(this.audioProcessorUrl);

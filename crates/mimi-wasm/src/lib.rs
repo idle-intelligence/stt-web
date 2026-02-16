@@ -532,6 +532,36 @@ impl MimiCodec {
         Ok(tokens)
     }
 
+    /// Encode an entire waveform at once (batch mode).
+    ///
+    /// Processes all audio through the encoder pipeline in a single pass,
+    /// avoiding the frame-boundary artifacts of per-frame encoding.
+    /// Returns a flat Vec of token IDs: [frame0_tok0..tok31, frame1_tok0..tok31, ...]
+    pub fn encode_all(&mut self, samples: &[f32]) -> Vec<u32> {
+        let time = samples.len();
+        let mut data = Array3::<f32>::zeros((1, 1, time));
+        for (i, &sample) in samples.iter().enumerate() {
+            data[[0, 0, i]] = sample;
+        }
+        let input = Tensor3::new(data);
+
+        // Full pipeline in one shot
+        let encoded = self.encoder.forward(&input);
+        let transformed = self.encoder_transformer.forward(&encoded);
+        let downsampled = self.downsample.forward(&transformed);
+        let codes = self.quantizer.encode(&downsampled);
+
+        // codes shape: (batch=1, num_codebooks=32, num_frames)
+        let num_frames = codes.shape()[2];
+        let mut all_tokens = Vec::with_capacity(num_frames * self.config.num_codebooks);
+        for f in 0..num_frames {
+            for q in 0..self.config.num_codebooks {
+                all_tokens.push(codes[[0, q, f]]);
+            }
+        }
+        all_tokens
+    }
+
     fn reset_inner(&mut self) {
         self.audio_buffer.clear();
         self.encoder.reset();

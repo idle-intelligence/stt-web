@@ -39,6 +39,9 @@ const server = createServer((req, res) => {
     // CORS headers (needed for WASM + WebGPU in cross-origin workers)
     res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
     res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
+    // Prevent caching during development
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+    res.setHeader("Pragma", "no-cache");
 
     // API: list available shards
     if (pathname === "/api/shards") {

@@ -132,6 +132,11 @@
             color: #999;
             font-style: italic;
         }
+        button.test-file {
+            font-size: 0.8rem;
+            padding: 0.4rem 0.8rem;
+            background: #f0f0f0;
+        }
         .info {
             font-size: 0.85rem;
             color: #888;
@@ -159,9 +164,16 @@
         <h2>Controls</h2>
         <div class="controls">
             <button id="recordBtn" class="primary" disabled>Start Recording</button>
+            <button id="fileBtn" disabled>Load WAV File</button>
             <button id="resetBtn" disabled>Reset</button>
+            <input type="file" id="fileInput" accept=".wav,audio/wav" style="display:none">
         </div>
-        <p class="info">Click Start Recording to begin transcription. Your audio stays on this device.</p>
+        <div class="controls" style="margin-top:0.5rem">
+            <button class="test-file" data-src="test-bria.wav" disabled>bria (EN, 30s)</button>
+            <button class="test-file" data-src="test-crepes-fr.wav" disabled>crepes (FR, 30s)</button>
+            <button class="test-file" data-src="test-loona.wav" disabled>loona (1s)</button>
+        </div>
+        <p class="info">Click Start Recording or load a test file. Audio stays on this device.</p>
     </div>
 
     <div class="card">
@@ -170,7 +182,7 @@
     </div>
 
     <script type="module">
-        import { SttClient } from './stt-client.js';
+        const { SttClient } = await import('./stt-client.js?v=' + Date.now());
 
         // UI elements
         const statusDot = document.getElementById('statusDot');
@@ -180,6 +192,9 @@
         const progressInfo = document.getElementById('progressInfo');
         const transcriptEl = document.getElementById('transcript');
         const recordBtn = document.getElementById('recordBtn');
+        const fileBtn = document.getElementById('fileBtn');
+        const fileInput = document.getElementById('fileInput');
+        const testFileBtns = document.querySelectorAll('.test-file');
         const resetBtn = document.getElementById('resetBtn');
 
         // State
@@ -213,6 +228,8 @@
                     if (ready) {
                         updateStatus('ready', text);
                         recordBtn.disabled = false;
+                        fileBtn.disabled = false;
+                        testFileBtns.forEach(b => b.disabled = false);
                         resetBtn.disabled = false;
                         progressBar.classList.remove('visible');
                         progressInfo.textContent = '';
@@ -285,6 +302,87 @@
                 statusDot.classList.remove('recording');
                 updateStatus('ready', 'Ready');
             }
+        });
+
+        // Shared: decode audio and feed to worker
+        async function feedAudioFile(arrayBuf, label) {
+            updateStatus('loading', `Decoding ${label}...`);
+            fileBtn.disabled = true;
+            recordBtn.disabled = true;
+            testFileBtns.forEach(b => b.disabled = true);
+
+            try {
+                // Decode to 24kHz mono (Mimi's native rate)
+                const offlineCtx = new OfflineAudioContext(1, 1, 24000);
+                const audioBuf = await offlineCtx.decodeAudioData(arrayBuf);
+
+                // Resample to 24kHz mono
+                const duration = audioBuf.duration;
+                const outLen = Math.ceil(duration * 24000);
+                const resampleCtx = new OfflineAudioContext(1, outLen, 24000);
+                const source = resampleCtx.createBufferSource();
+                source.buffer = audioBuf;
+                source.connect(resampleCtx.destination);
+                source.start(0);
+                const rendered = await resampleCtx.startRendering();
+                const pcm = rendered.getChannelData(0);
+
+                console.log(`[file] Decoded: ${pcm.length} samples (${(pcm.length/24000).toFixed(1)}s) at 24kHz`);
+                updateStatus('loading', `Feeding ${(pcm.length/24000).toFixed(1)}s of audio...`);
+
+                // Reset state before feeding
+                client.worker.postMessage({ type: 'reset' });
+                transcriptText = '';
+                transcriptEl.textContent = '';
+                transcriptEl.classList.remove('empty');
+
+                // Feed in ~100ms chunks (2400 samples)
+                const CHUNK = 2400;
+                for (let i = 0; i < pcm.length; i += CHUNK) {
+                    const chunk = pcm.slice(i, Math.min(i + CHUNK, pcm.length));
+                    client.worker.postMessage(
+                        { type: 'audio', samples: chunk },
+                        [chunk.buffer]
+                    );
+                    // Yield to let worker process and UI update
+                    if (i % (CHUNK * 10) === 0) {
+                        await new Promise(r => setTimeout(r, 0));
+                    }
+                }
+
+                // Flush remaining tokens
+                client.worker.postMessage({ type: 'stop' });
+                updateStatus('ready', `Done — fed ${(pcm.length/24000).toFixed(1)}s from ${label}`);
+            } catch (err) {
+                updateStatus('error', 'File error: ' + err.message);
+                console.error(err);
+            } finally {
+                fileBtn.disabled = false;
+                recordBtn.disabled = false;
+                testFileBtns.forEach(b => b.disabled = false);
+            }
+        }
+
+        // File picker button
+        fileBtn.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            fileInput.value = '';
+            await feedAudioFile(await file.arrayBuffer(), file.name);
+        });
+
+        // Test file buttons — fetch from server and feed
+        testFileBtns.forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const src = btn.dataset.src;
+                const resp = await fetch(src);
+                if (!resp.ok) {
+                    updateStatus('error', `Failed to fetch ${src}`);
+                    return;
+                }
+                await feedAudioFile(await resp.arrayBuffer(), src);
+            });
         });
 
         // Reset button

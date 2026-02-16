@@ -49,6 +49,8 @@ pub struct SttConfig {
     pub sliding_window: usize,
     /// Text padding token ID.
     pub text_padding_id: u32,
+    /// Text start token ID (fed on first step; = text_in_vocab_size - 1).
+    pub text_start_token: u32,
 }
 
 impl Default for SttConfig {
@@ -64,11 +66,12 @@ impl Default for SttConfig {
             text_in_vocab_size: 8001,
             num_codebooks: 32,
             audio_vocab_size: 2049,
-            text_delay: 6,
+            text_delay: 7,
             rope_theta: 100000.0,
             max_seq_len: 4096,
             sliding_window: 750,
             text_padding_id: 3,
+            text_start_token: 8000, // text_in_vocab_size - 1
         }
     }
 }

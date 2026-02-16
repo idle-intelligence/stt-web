@@ -138,10 +138,11 @@ async function cachedFetch(url, label) {
 async function handleLoad(config) {
     const base = (config.baseUrl || '').replace(/\/+$/, '');
 
-    // 1. Import WASM module.
+    // 1. Import WASM module (cache-bust during dev).
     self.postMessage({ type: 'status', text: 'Loading WASM module...' });
-    sttWasm = await import(base + '/pkg/stt_wasm.js');
-    await sttWasm.default();
+    const cacheBust = '?v=' + Date.now();
+    sttWasm = await import(base + '/pkg/stt_wasm.js' + cacheBust);
+    await sttWasm.default(base + '/pkg/stt_wasm_bg.wasm' + cacheBust);
 
     // 2. Initialize WebGPU device.
     self.postMessage({ type: 'status', text: 'Initializing WebGPU device...' });
@@ -192,7 +193,16 @@ async function handleLoad(config) {
     tokenizer = new SpmDecoder();
     await tokenizer.load(tokenizerUrl);
 
-    // 8. Signal ready.
+    // 8. Run diagnostic forward pass to compare with native Metal output.
+    self.postMessage({ type: 'status', text: 'Running diagnostics...' });
+    try {
+        const diagResult = await engine.diagnose();
+        console.log('[worker] DIAGNOSE OUTPUT:\n' + diagResult);
+    } catch (diagErr) {
+        console.warn('[worker] Diagnose failed:', diagErr);
+    }
+
+    // 9. Signal ready.
     self.postMessage({ type: 'status', text: 'Ready', ready: true });
 }
 
@@ -206,12 +216,12 @@ async function handleAudio({ samples }) {
 
     // feedAudio returns Vec<u32> of text token IDs
     const tokenIds = await engine.feedAudio(audioData);
+    const ids = tokenIds ? Array.from(tokenIds) : [];
+    console.log('[worker] feedAudio →', ids);
 
-    if (tokenIds && tokenIds.length > 0) {
-        const text = tokenizer.decode(Array.from(tokenIds));
-        if (text) {
-            self.postMessage({ type: 'transcript', text, final: false });
-        }
+    if (ids.length > 0) {
+        const text = tokenizer.decode(ids);
+        self.postMessage({ type: 'transcript', text, final: false });
     }
 }
 

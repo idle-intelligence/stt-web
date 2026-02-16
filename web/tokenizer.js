@@ -43,6 +43,19 @@ export class SpmDecoder {
         }
 
         const pieces = [];
+        let byteBuffer = []; // Accumulate byte fallback tokens
+
+        const flushBytes = () => {
+            if (byteBuffer.length > 0) {
+                try {
+                    pieces.push(new TextDecoder('utf-8').decode(new Uint8Array(byteBuffer)));
+                } catch {
+                    // Invalid UTF-8 sequence — skip
+                }
+                byteBuffer = [];
+            }
+        };
+
         for (const id of ids) {
             // Skip special tokens
             if (id === 0 || id === 3) {
@@ -50,10 +63,23 @@ export class SpmDecoder {
             }
 
             const piece = this.vocab.get(id);
-            if (piece !== undefined) {
+            if (piece === undefined) {
+                continue;
+            }
+
+            // Detect byte fallback tokens: <0xHH> pattern (IDs 4-259)
+            const byteMatch = piece.match(/^<0x([0-9A-Fa-f]{2})>$/);
+            if (byteMatch) {
+                byteBuffer.push(parseInt(byteMatch[1], 16));
+            } else {
+                // Flush any pending byte buffer before adding text piece
+                flushBytes();
                 pieces.push(piece);
             }
         }
+
+        // Flush remaining bytes
+        flushBytes();
 
         // Join pieces and convert SentencePiece underscores to spaces
         let text = pieces.join('');

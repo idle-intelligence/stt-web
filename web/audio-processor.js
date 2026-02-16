@@ -1,15 +1,14 @@
 /**
- * AudioWorklet processor: captures mic input and sends 16kHz mono PCM chunks.
+ * AudioWorklet processor: captures mic input and sends 24kHz mono PCM chunks.
  *
  * Registered as 'audio-processor'. The main thread creates an AudioWorkletNode
  * pointing to this processor, then forwards PCM chunks to the Web Worker.
  *
- * The AudioContext is created with { sampleRate: 16000 }. While the Mimi codec
- * natively expects 24kHz audio, the Mimi WASM module handles resampling internally.
- * We simply pass through 16kHz samples from the AudioWorklet.
+ * The AudioContext is created with { sampleRate: 24000 } to match the Mimi
+ * codec's native sample rate. No resampling needed.
  *
  * Each process() call receives 128 samples at the context sample rate.
- * We buffer them into larger chunks (~1280 samples = 80ms at 16kHz) to
+ * We buffer them into larger chunks (~1920 samples = 80ms at 24kHz) to
  * reduce postMessage overhead while keeping latency low.
  */
 
@@ -17,11 +16,8 @@ class AudioProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
         // Buffer samples to reduce postMessage overhead.
-        // At 16kHz, 1280 samples = 80ms — a good balance between
-        // latency and message frequency.
-        // Note: Mimi codec expects 24kHz, but resampling is handled
-        // internally by the Mimi WASM module.
-        this._buffer = new Float32Array(1280);
+        // At 24kHz, 1920 samples = 80ms = one Mimi frame.
+        this._buffer = new Float32Array(1920);
         this._writePos = 0;
         this._active = true;
 

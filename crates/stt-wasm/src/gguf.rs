@@ -668,6 +668,29 @@ impl EmbeddingStore {
 
         Tensor::from_data(TensorData::new(output, [ids.len(), self.dim]), device)
     }
+
+    /// Dequantize a single row into an existing CPU buffer (for accumulation).
+    ///
+    /// Adds the dequantized embedding to `out_buf` (which must be `dim` f32s).
+    /// This avoids creating a GPU tensor per embedding lookup.
+    pub fn embed_id_add_cpu(&self, id: u32, out_buf: &mut [f32]) {
+        assert_eq!(out_buf.len(), self.dim);
+        let blocks_per_row = self.dim / 32;
+        let bytes_per_row = blocks_per_row * 18;
+        let row_offset = (id as usize) * bytes_per_row;
+        let row_bytes = &self.cpu_bytes[row_offset..row_offset + bytes_per_row];
+
+        for block in 0..blocks_per_row {
+            let bo = block * 18;
+            let d = f16_to_f32(u16::from_le_bytes([row_bytes[bo], row_bytes[bo + 1]]));
+            let base = block * 32;
+            for j in 0..16 {
+                let byte = row_bytes[bo + 2 + j];
+                out_buf[base + j] += ((byte & 0x0F) as f32 - 8.0) * d;
+                out_buf[base + j + 16] += (((byte >> 4) & 0x0F) as f32 - 8.0) * d;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

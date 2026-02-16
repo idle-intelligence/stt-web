@@ -71,3 +71,4 @@ required-features = ["cli"]
 
 [dev-dependencies]
 approx = "0.5"
+pollster = "0.4"

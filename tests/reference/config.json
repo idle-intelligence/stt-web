@@ -1,0 +1,14 @@
+{
+  "audio_silence_prefix_seconds": 0.0,
+  "audio_delay_seconds": 0.5,
+  "padding_token_id": 3,
+  "mimi_sample_rate": 24000,
+  "mimi_frame_size": 1920,
+  "mimi_frame_rate": 12.5,
+  "audio_file": "refs/delayed-streams-modeling/audio/bria.mp3",
+  "device": "cpu",
+  "stt_config": {
+    "audio_delay_seconds": 0.5,
+    "audio_silence_prefix_seconds": 0.0
+  }
+}
