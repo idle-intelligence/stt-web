@@ -22,29 +22,44 @@ let engine = null;
 let sttWasm = null;
 let tokenizer = null;
 
-self.onmessage = async (e) => {
-    const { type, ...data } = e.data;
+// Serialize all engine access to prevent wasm-bindgen "recursive use" errors.
+// The WASM engine uses &mut self, so only one call can be active at a time.
+let busy = false;
+const msgQueue = [];
 
-    try {
-        switch (type) {
-            case 'load':
-                await handleLoad(data.config || {});
-                break;
-            case 'audio':
-                await handleAudio(data);
-                break;
-            case 'stop':
-                await handleStop();
-                break;
-            case 'reset':
-                handleReset();
-                break;
-            default:
-                console.warn('[worker] Unknown message type:', type);
+async function drainQueue() {
+    if (busy) return;
+    busy = true;
+    while (msgQueue.length > 0) {
+        const { type, data } = msgQueue.shift();
+        try {
+            switch (type) {
+                case 'load':
+                    await handleLoad(data.config || {});
+                    break;
+                case 'audio':
+                    await handleAudio(data);
+                    break;
+                case 'stop':
+                    await handleStop();
+                    break;
+                case 'reset':
+                    handleReset();
+                    break;
+                default:
+                    console.warn('[worker] Unknown message type:', type);
+            }
+        } catch (err) {
+            self.postMessage({ type: 'error', message: err.message || String(err) });
         }
-    } catch (err) {
-        self.postMessage({ type: 'error', message: err.message || String(err) });
     }
+    busy = false;
+}
+
+self.onmessage = (e) => {
+    const { type, ...data } = e.data;
+    msgQueue.push({ type, data });
+    drainQueue();
 };
 
 // ---------------------------------------------------------------------------
