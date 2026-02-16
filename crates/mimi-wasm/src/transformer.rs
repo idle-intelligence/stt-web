@@ -6,26 +6,27 @@ use crate::tensor::Tensor3;
 use ndarray::{Array1, Array2, Array3};
 
 /// Multi-head self-attention layer.
+///
+/// Supports combined in_proj (3*d_model, d_model) as used in Mimi safetensors.
 #[derive(Clone, Debug)]
 pub struct MultiHeadAttention {
     pub num_heads: usize,
     pub head_dim: usize,
-    pub q_proj: Array2<f32>, // (d_model, d_model)
-    pub k_proj: Array2<f32>,
-    pub v_proj: Array2<f32>,
+    /// Combined Q/K/V projection: (3*d_model, d_model)
+    pub in_proj: Array2<f32>,
+    /// Output projection: (d_model, d_model)
     pub out_proj: Array2<f32>,
     // KV cache for streaming
-    pub k_cache: Option<Array3<f32>>, // (batch, heads, seq_len, head_dim)
+    pub k_cache: Option<Array3<f32>>,
     pub v_cache: Option<Array3<f32>>,
 }
 
 impl MultiHeadAttention {
+    /// Create from combined in_proj weight (3*d_model, d_model).
     pub fn new(
         d_model: usize,
         num_heads: usize,
-        q_proj: Array2<f32>,
-        k_proj: Array2<f32>,
-        v_proj: Array2<f32>,
+        in_proj: Array2<f32>,
         out_proj: Array2<f32>,
     ) -> Self {
         assert_eq!(d_model % num_heads, 0, "d_model must be divisible by num_heads");
@@ -33,9 +34,7 @@ impl MultiHeadAttention {
         Self {
             num_heads,
             head_dim,
-            q_proj,
-            k_proj,
-            v_proj,
+            in_proj,
             out_proj,
             k_cache: None,
             v_cache: None,
@@ -109,19 +108,27 @@ pub struct TransformerLayer {
     pub ff: FeedForward,
     pub norm1: LayerNorm,
     pub norm2: LayerNorm,
-    pub layer_scale: Option<f32>,
+    /// Per-dimension layer scale applied after attention: (d_model,)
+    pub layer_scale_1: Option<Array1<f32>>,
+    /// Per-dimension layer scale applied after feedforward: (d_model,)
+    pub layer_scale_2: Option<Array1<f32>>,
 }
 
 impl TransformerLayer {
     pub fn forward(&self, x: &Tensor3) -> Tensor3 {
-        // Simplified transformer layer
-        // norm_first = true: norm -> attn -> residual -> norm -> ff -> residual
+        // norm_first = true: norm -> attn -> scale -> residual -> norm -> ff -> scale -> residual
         let normed = self.norm1.forward(x);
-        let attn_out = self.attn.forward(&normed);
+        let mut attn_out = self.attn.forward(&normed);
+        if let Some(ref scale) = self.layer_scale_1 {
+            attn_out = attn_out.scale_channels(scale);
+        }
         let x = x + &attn_out;
 
         let normed = self.norm2.forward(&x);
-        let ff_out = self.ff.forward(&normed);
+        let mut ff_out = self.ff.forward(&normed);
+        if let Some(ref scale) = self.layer_scale_2 {
+            ff_out = ff_out.scale_channels(scale);
+        }
         let x = &x + &ff_out;
 
         x

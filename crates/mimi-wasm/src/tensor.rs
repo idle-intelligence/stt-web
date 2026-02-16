@@ -71,6 +71,88 @@ impl Tensor3 {
         let data = ndarray::concatenate(Axis(2), &views).expect("concat failed");
         Self { data }
     }
+
+    /// Multiply each channel by a per-channel scale vector.
+    /// scale shape: (channels,), self shape: (batch, channels, time)
+    pub fn scale_channels(&self, scale: &Array1<f32>) -> Self {
+        let (batch, channels, time) = self.shape();
+        assert_eq!(scale.len(), channels);
+        let mut out = self.data.clone();
+        for b in 0..batch {
+            for c in 0..channels {
+                let s = scale[c];
+                for t in 0..time {
+                    out[[b, c, t]] *= s;
+                }
+            }
+        }
+        Self { data: out }
+    }
+
+    /// Transpose axes 1 and 2: (batch, channels, time) → (batch, time, channels)
+    pub fn transpose_12(&self) -> Self {
+        let permuted = self.data.clone().permuted_axes([0, 2, 1]);
+        Self { data: permuted.as_standard_layout().to_owned() }
+    }
+
+    /// Apply GELU activation element-wise.
+    pub fn gelu(&self) -> Self {
+        let data = self.data.mapv(|x| {
+            // GELU(x) = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+            let c = (2.0_f32 / std::f32::consts::PI).sqrt();
+            x * 0.5 * (1.0 + (c * (x + 0.044715 * x * x * x)).tanh())
+        });
+        Self { data }
+    }
+
+    /// Softmax over the last dimension (axis 2).
+    pub fn softmax_last(&self) -> Self {
+        let (batch, d1, d2) = self.shape();
+        let mut out = self.data.clone();
+        for b in 0..batch {
+            for i in 0..d1 {
+                // Find max for numerical stability
+                let mut max_val = f32::NEG_INFINITY;
+                for j in 0..d2 {
+                    max_val = max_val.max(out[[b, i, j]]);
+                }
+                // Exp and sum
+                let mut sum = 0.0f32;
+                for j in 0..d2 {
+                    out[[b, i, j]] = (out[[b, i, j]] - max_val).exp();
+                    sum += out[[b, i, j]];
+                }
+                // Normalize
+                if sum > 0.0 {
+                    for j in 0..d2 {
+                        out[[b, i, j]] /= sum;
+                    }
+                }
+            }
+        }
+        Self { data: out }
+    }
+
+    /// Batched matrix multiply: (batch, M, K) @ (batch, K, N) → (batch, M, N)
+    pub fn matmul(&self, other: &Self) -> Self {
+        let (b1, m, k1) = self.shape();
+        let (b2, k2, n) = other.shape();
+        assert_eq!(b1, b2, "batch size mismatch");
+        assert_eq!(k1, k2, "inner dimension mismatch");
+        let mut out = Array3::<f32>::zeros((b1, m, n));
+        for b in 0..b1 {
+            for i in 0..m {
+                for j in 0..n {
+                    let mut sum = 0.0f32;
+                    for k in 0..k1 {
+                        sum += self.data[[b, i, k]] * other.data[[b, k, j]];
+                    }
+                    out[[b, i, j]] = sum;
+                }
+            }
+        }
+        Self { data: out }
+    }
 }
 
 impl Add for Tensor3 {
