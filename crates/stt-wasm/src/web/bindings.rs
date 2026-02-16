@@ -185,7 +185,7 @@ impl SttEngine {
         wasm_log(&format!("[stt] Loading Mimi codec from {weights_url}..."));
         let mimi = mimi_wasm::MimiCodec::new(weights_url)
             .await
-            .map_err(|e| JsError::new(&format!("Failed to load Mimi: {e}")))?;
+            .map_err(|e| JsError::new(&format!("Failed to load Mimi: {e:?}")))?;
         self.mimi = Some(mimi);
         wasm_log("[stt] Mimi codec loaded");
         Ok(())

@@ -21,12 +21,12 @@ else
 fi
 
 echo "Downloading tokenizer..."
-if [ ! -f "$MODELS_DIR/tokenizer_spm_32k_3.model" ]; then
-    curl -L -o "$MODELS_DIR/tokenizer_spm_32k_3.model" \
-        "https://huggingface.co/kyutai/stt-1b-en_fr/resolve/main/tokenizer_spm_32k_3.model"
-    echo "  Done: $MODELS_DIR/tokenizer_spm_32k_3.model"
+if [ ! -f "$MODELS_DIR/tokenizer.model" ]; then
+    curl -L -o "$MODELS_DIR/tokenizer.model" \
+        "https://huggingface.co/kyutai/stt-1b-en_fr/resolve/main/tokenizer_en_fr_audio_8000.model"
+    echo "  Done: $MODELS_DIR/tokenizer.model"
 else
-    echo "  Already exists: $MODELS_DIR/tokenizer_spm_32k_3.model"
+    echo "  Already exists: $MODELS_DIR/tokenizer.model"
 fi
 
 echo ""

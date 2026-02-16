@@ -128,16 +128,17 @@ def write_gguf_metadata(f, metadata: Dict):
     for key, value in metadata.items():
         write_gguf_string(f, key)
 
-        # Determine type and write
+        # Determine type and write (GGUF spec type codes)
+        # 4=UINT32(4B), 5=INT32(4B), 6=FLOAT32(4B), 8=STRING, 10=UINT64(8B), 12=FLOAT64(8B)
         if isinstance(value, str):
             f.write(struct.pack('<I', 8))  # GGUF_TYPE_STRING
             write_gguf_string(f, value)
         elif isinstance(value, int):
-            f.write(struct.pack('<I', 6))  # GGUF_TYPE_INT64
-            f.write(struct.pack('<q', value))
+            f.write(struct.pack('<I', 4))  # GGUF_TYPE_UINT32
+            f.write(struct.pack('<I', value))
         elif isinstance(value, float):
-            f.write(struct.pack('<I', 5))  # GGUF_TYPE_FLOAT64
-            f.write(struct.pack('<d', value))
+            f.write(struct.pack('<I', 6))  # GGUF_TYPE_FLOAT32
+            f.write(struct.pack('<f', value))
         else:
             raise ValueError(f"Unsupported metadata type: {type(value)}")
 
@@ -195,6 +196,27 @@ def write_gguf_header(f, tensors: List[Tuple[str, torch.Tensor, int]], metadata:
     f.write(b'\x00' * padding)
 
 
+def is_stt_tensor(name: str) -> bool:
+    """Return True if this tensor belongs to the STT model (not Mimi codec).
+
+    STT tensors: emb.{0-31}.weight, text_emb.weight, text_linear.weight,
+    out_norm.alpha, transformer.layers.{i}.*, extra_heads.*
+    """
+    if name.startswith('emb.'):
+        return True
+    if name.startswith('text_emb.'):
+        return True
+    if name.startswith('text_linear.'):
+        return True
+    if name.startswith('out_norm.'):
+        return True
+    if name.startswith('transformer.'):
+        return True
+    if name.startswith('extra_heads.'):
+        return True
+    return False
+
+
 def should_quantize(name: str) -> bool:
     """Determine if a tensor should be quantized to Q4_0 or kept as F32.
 
@@ -205,14 +227,17 @@ def should_quantize(name: str) -> bool:
     if name.startswith('extra_heads.'):
         return False
 
-    # Keep norm alpha parameters as F32 (small 1D tensors)
+    # Keep norm alpha parameters as F32 (small tensors)
     if '.alpha' in name:
         return False
 
-    # Quantize all weight matrices to Q4_0, including embeddings
-    # (emb.*.weight, text_emb.weight, in_proj_weight, out_proj.weight,
-    #  linear_in.weight, linear_out.weight, text_linear.weight)
-    if '.weight' in name:
+    # Quantize all weight matrices to Q4_0, including:
+    # - emb.*.weight, text_emb.weight (embeddings)
+    # - self_attn.in_proj_weight (combined QKV projection)
+    # - self_attn.out_proj.weight
+    # - gating.linear_in.weight, gating.linear_out.weight (FFN)
+    # - text_linear.weight (output head)
+    if name.endswith('.weight') or name.endswith('_weight'):
         return True
 
     return False
@@ -229,15 +254,18 @@ def load_and_quantize_model(model_dir: Path, output_path: Path, max_shard_mb: in
 
     print(f"Found {len(safetensors_files)} safetensors files")
 
-    # Load all tensors
+    # Load only STT model tensors (skip Mimi codec weights)
     all_tensors = {}
     for st_file in safetensors_files:
         print(f"  Loading {st_file.name}...")
         with safe_open(st_file, framework="pt", device="cpu") as f:
             for key in f.keys():
-                all_tensors[key] = f.get_tensor(key)
+                if is_stt_tensor(key):
+                    all_tensors[key] = f.get_tensor(key)
+                else:
+                    print(f"    SKIP (not STT): {key}")
 
-    print(f"Loaded {len(all_tensors)} tensors")
+    print(f"Loaded {len(all_tensors)} STT tensors (filtered from safetensors)")
 
     # Map safetensors names to GGUF names and prepare for quantization
     gguf_tensors: List[Tuple[str, torch.Tensor, int]] = []

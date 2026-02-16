@@ -1,20 +1,19 @@
 #!/usr/bin/env node
 /**
- * HTTPS dev server for Kyutai STT browser demo.
+ * Dev server for Kyutai STT browser demo.
  *
  * Serves the web app, WASM pkg, and model shards.
- * WebGPU requires HTTPS — run scripts/gen-cert.sh first.
  *
- * Usage: bun web/serve.mjs [--port 8443]
+ * Usage: node web/serve.mjs [--port 8080]
  */
 
-import { createServer } from "node:https";
-import { readFileSync, createReadStream, existsSync, statSync, readdirSync } from "node:fs";
+import { createServer } from "node:http";
+import { createReadStream, existsSync, statSync, readdirSync } from "node:fs";
 import { join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(fileURLToPath(import.meta.url), "../..");
-const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === "--port") ?? "8443");
+const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === "--port") ?? "8080");
 
 const MIME = {
     ".html": "text/html",
@@ -27,19 +26,14 @@ const MIME = {
     ".bin":  "application/octet-stream",
 };
 
-const TLS = {
-    key:  readFileSync("/tmp/stt-key.pem"),
-    cert: readFileSync("/tmp/stt-cert.pem"),
-};
-
 // Discover model shards
 const SHARD_DIR = join(ROOT, "models/stt-1b-en_fr-q4-shards");
 const shardNames = existsSync(SHARD_DIR)
     ? readdirSync(SHARD_DIR).filter(f => f.startsWith("shard-")).sort()
     : [];
 
-const server = createServer(TLS, (req, res) => {
-    const url = new URL(req.url, `https://${req.headers.host}`);
+const server = createServer((req, res) => {
+    const url = new URL(req.url, `http://${req.headers.host}`);
     const pathname = decodeURIComponent(url.pathname);
 
     // CORS headers (needed for WASM + WebGPU in cross-origin workers)
@@ -106,7 +100,6 @@ const server = createServer(TLS, (req, res) => {
 
 server.listen(PORT, "0.0.0.0", () => {
     console.log(`\nKyutai STT dev server running:`);
-    console.log(`  Local:   https://localhost:${PORT}`);
-    console.log(`\nModel shards: ${shardNames.length} (${SHARD_DIR})`);
-    console.log(`\nNote: Accept the self-signed certificate in your browser.\n`);
+    console.log(`  Local:   http://localhost:${PORT}`);
+    console.log(`\nModel shards: ${shardNames.length} (${SHARD_DIR})\n`);
 });

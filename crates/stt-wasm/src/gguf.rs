@@ -831,8 +831,8 @@ impl<R: Read + Seek> Q4ModelLoader<R> {
         let ffn_norm =
             self.load_rms_norm(&format!("{prefix}.norm2.alpha"), 1e-8, device)?;
 
-        let linear_in = self.load_q4_linear(&format!("{prefix}.mlp.gating.linear_in.weight"), device)?;
-        let linear_out = self.load_q4_linear(&format!("{prefix}.mlp.gating.linear_out.weight"), device)?;
+        let linear_in = self.load_q4_linear(&format!("{prefix}.gating.linear_in.weight"), device)?;
+        let linear_out = self.load_q4_linear(&format!("{prefix}.gating.linear_out.weight"), device)?;
 
         let ffn = Q4FeedForward::new(linear_in, linear_out);
 
@@ -904,7 +904,29 @@ impl<R: Read + Seek> Q4ModelLoader<R> {
         eps: f64,
         device: &WgpuDevice,
     ) -> Result<RmsNormLayer> {
-        let weight: Tensor<Wgpu, 1> = self.load_f32_tensor(name, device)?;
+        // Load as generic f32 data, then reshape to 1D.
+        // The actual safetensors store alpha as [1, 1, 2048] (3D)
+        // but RmsNorm expects a 1D [hidden_size] tensor.
+        let info = self
+            .reader
+            .tensor_info(name)
+            .with_context(|| format!("Tensor '{name}' not found"))?
+            .clone();
+        let num_elements: u64 = info.num_elements();
+        let bytes = self.reader.tensor_data(name)?;
+        let data: Vec<f32> = match info.dtype() {
+            GgmlDtype::F32 => bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect(),
+            GgmlDtype::F16 => bytes
+                .chunks_exact(2)
+                .map(|b| f16_to_f32(u16::from_le_bytes([b[0], b[1]])))
+                .collect(),
+            GgmlDtype::Q4_0 => bail!("Cannot load Q4_0 tensor '{name}' as norm weight"),
+        };
+        let weight: Tensor<Wgpu, 1> =
+            Tensor::from_data(TensorData::new(data, [num_elements as usize]), device);
         Ok(RmsNormLayer {
             inner: burn::nn::RmsNorm {
                 gamma: Param::initialized(ParamId::new(), weight),

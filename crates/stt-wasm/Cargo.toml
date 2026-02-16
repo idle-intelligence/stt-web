@@ -21,6 +21,7 @@ wasm = [
     "web-sys",
     "console_error_panic_hook",
     "getrandom/wasm_js",
+    "mimi-wasm/wasm",
 ]
 cli = ["clap", "indicatif"]
 hub = ["hf-hub"]
@@ -31,7 +32,7 @@ burn = { workspace = true }
 cubecl = { workspace = true }
 
 # Local crate
-mimi-wasm = { path = "../mimi-wasm" }
+mimi-wasm = { path = "../mimi-wasm", default-features = false }
 
 # Core
 anyhow = { workspace = true }
