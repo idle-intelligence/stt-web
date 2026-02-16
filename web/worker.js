@@ -28,7 +28,7 @@ self.onmessage = async (e) => {
     try {
         switch (type) {
             case 'load':
-                await handleLoad();
+                await handleLoad(data.config || {});
                 break;
             case 'audio':
                 await handleAudio(data);
@@ -120,10 +120,12 @@ async function cachedFetch(url, label) {
 // Message handlers
 // ---------------------------------------------------------------------------
 
-async function handleLoad() {
+async function handleLoad(config) {
+    const base = (config.baseUrl || '').replace(/\/+$/, '');
+
     // 1. Import WASM module.
     self.postMessage({ type: 'status', text: 'Loading WASM module...' });
-    sttWasm = await import('/pkg/stt_wasm.js');
+    sttWasm = await import(base + '/pkg/stt_wasm.js');
     await sttWasm.default();
 
     // 2. Initialize WebGPU device.
@@ -135,8 +137,15 @@ async function handleLoad() {
 
     // 4. Discover and download model shards.
     self.postMessage({ type: 'status', text: 'Discovering model shards...' });
-    const shardResp = await fetch('/api/shards');
-    const { shards } = await shardResp.json();
+
+    let shards;
+    if (config.shardList && config.shardList.length > 0) {
+        shards = config.shardList;
+    } else {
+        const shardResp = await fetch(base + '/api/shards');
+        const shardData = await shardResp.json();
+        shards = shardData.shards;
+    }
 
     if (shards.length === 0) {
         throw new Error(
@@ -146,7 +155,7 @@ async function handleLoad() {
 
     for (let i = 0; i < shards.length; i++) {
         const name = shards[i];
-        const url = `/models/stt-1b-en_fr-q4-shards/${name}`;
+        const url = base + `/models/stt-1b-en_fr-q4-shards/${name}`;
         const label = `Downloading shard ${i + 1}/${shards.length}`;
 
         const buf = await cachedFetch(url, label);
@@ -159,12 +168,14 @@ async function handleLoad() {
 
     // 6. Load Mimi codec weights.
     self.postMessage({ type: 'status', text: 'Loading Mimi codec...' });
-    await engine.loadMimi('/models/mimi.safetensors');
+    const mimiUrl = config.mimiUrl || (base + '/models/mimi.safetensors');
+    await engine.loadMimi(mimiUrl);
 
     // 7. Load tokenizer.
     self.postMessage({ type: 'status', text: 'Loading tokenizer...' });
+    const tokenizerUrl = config.tokenizerUrl || (base + '/models/tokenizer.model');
     tokenizer = new SpmDecoder();
-    await tokenizer.load('/models/tokenizer_spm_32k_3.model');
+    await tokenizer.load(tokenizerUrl);
 
     // 8. Signal ready.
     self.postMessage({ type: 'status', text: 'Ready', ready: true });

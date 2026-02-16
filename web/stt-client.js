@@ -6,7 +6,6 @@
  *
  * Usage:
  *   const stt = new SttClient({
- *       modelUrl: 'https://huggingface.co/.../stt-1b-en_fr-q4.gguf',
  *       onTranscript: (text, isFinal) => console.log(text),
  *       onStatus: (text, isReady) => console.log(text),
  *       onError: (err) => console.error(err),
@@ -16,6 +15,13 @@
  *   // ... user speaks ...
  *   stt.stopRecording();
  *   stt.destroy();
+ *
+ * Embeddable usage with custom base URL:
+ *   const stt = new SttClient({
+ *       baseUrl: 'https://cdn.example.com/stt',
+ *       shardList: ['shard-00000.gguf', 'shard-00001.gguf'],
+ *       onTranscript: (text, isFinal) => console.log(text),
+ *   });
  */
 
 export class SttClient {
@@ -23,6 +29,16 @@ export class SttClient {
         this.onTranscript = options.onTranscript || (() => {});
         this.onStatus = options.onStatus || (() => {});
         this.onError = options.onError || console.error;
+
+        // URL configuration for embedding
+        this.baseUrl = (options.baseUrl || '').replace(/\/+$/, '');
+        this.workerUrl = options.workerUrl || (this.baseUrl + '/worker.js');
+        this.audioProcessorUrl = options.audioProcessorUrl || (this.baseUrl + '/audio-processor.js');
+
+        // Optional overrides passed to the worker
+        this.shardList = options.shardList || null;
+        this.mimiUrl = options.mimiUrl || null;
+        this.tokenizerUrl = options.tokenizerUrl || null;
 
         this.worker = null;
         this.audioContext = null;
@@ -37,7 +53,7 @@ export class SttClient {
     /** Load model — returns when ready to record. */
     async init() {
         return new Promise((resolve, reject) => {
-            this.worker = new Worker('./worker.js', { type: 'module' });
+            this.worker = new Worker(this.workerUrl, { type: 'module' });
 
             this.worker.onmessage = (e) => this._handleWorkerMessage(e);
             this.worker.onerror = (err) => {
@@ -56,8 +72,12 @@ export class SttClient {
             };
             this._pendingReject = reject;
 
-            // Send load command to worker
-            this.worker.postMessage({ type: 'load' });
+            // Send load command to worker with URL config
+            const config = { baseUrl: this.baseUrl };
+            if (this.shardList) config.shardList = this.shardList;
+            if (this.mimiUrl) config.mimiUrl = this.mimiUrl;
+            if (this.tokenizerUrl) config.tokenizerUrl = this.tokenizerUrl;
+            this.worker.postMessage({ type: 'load', config });
         });
     }
 
@@ -81,7 +101,7 @@ export class SttClient {
         this.audioContext = new AudioContext({ sampleRate: 16000 });
 
         // Register AudioWorklet processor
-        await this.audioContext.audioWorklet.addModule('./audio-processor.js');
+        await this.audioContext.audioWorklet.addModule(this.audioProcessorUrl);
 
         // Create worklet node
         this.workletNode = new AudioWorkletNode(this.audioContext, 'audio-processor');

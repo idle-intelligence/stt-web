@@ -203,6 +203,11 @@
             statusText.textContent = 'WebGPU not supported in this browser. Please use Chrome or Edge (version 113+).';
         } else {
             // Initialize client
+            // For embedding on another domain, configure baseUrl and optional overrides:
+            //   baseUrl: 'https://cdn.example.com/stt',
+            //   shardList: ['shard-00000.gguf', 'shard-00001.gguf', ...],
+            //   mimiUrl: 'https://cdn.example.com/stt/models/mimi.safetensors',
+            //   tokenizerUrl: 'https://cdn.example.com/stt/models/tokenizer.model',
             client = new SttClient({
                 onStatus: (text, ready, progress) => {
                     if (ready) {
