@@ -1,0 +1,72 @@
+[package]
+name = "stt-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kyutai STT 1B transformer in Burn+wgpu — runs natively and in browser via WASM+WebGPU"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["wgpu", "native-tokenizer"]
+wgpu = ["burn/wgpu"]
+native-tokenizer = ["tokenizers"]
+wasm = [
+    "wgpu",
+    "dep:wgpu",
+    "wasm-bindgen",
+    "wasm-bindgen-futures",
+    "js-sys",
+    "web-sys",
+    "console_error_panic_hook",
+    "getrandom/wasm_js",
+]
+cli = ["clap", "indicatif"]
+hub = ["hf-hub"]
+
+[dependencies]
+# Burn ML framework
+burn = { workspace = true }
+cubecl = { workspace = true }
+
+# Local crate
+mimi-wasm = { path = "../mimi-wasm" }
+
+# Core
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+byteorder = { workspace = true }
+
+# Audio
+hound = { workspace = true }
+
+# Tokenizer (native only — has C dependencies)
+tokenizers = { workspace = true, optional = true }
+
+# CLI (optional)
+clap = { workspace = true, optional = true }
+indicatif = { workspace = true, optional = true }
+
+# HuggingFace Hub (optional)
+hf-hub = { workspace = true, optional = true }
+
+# WASM support (optional)
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true }
+console_error_panic_hook = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
+
+[[bin]]
+name = "stt-transcribe"
+path = "src/bin/transcribe.rs"
+required-features = ["cli"]
+
+[dev-dependencies]
+approx = "0.5"

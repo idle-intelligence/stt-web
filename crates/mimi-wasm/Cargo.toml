@@ -1,0 +1,36 @@
+[package]
+name = "mimi-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mimi audio codec compiled to WASM — converts PCM audio to 32-codebook tokens at 12.5Hz"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+wasm = [
+    "wasm-bindgen",
+    "wasm-bindgen-futures",
+    "js-sys",
+    "web-sys",
+    "console_error_panic_hook",
+    "getrandom/wasm_js",
+]
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+byteorder = { workspace = true }
+safetensors = "0.5"
+
+# WASM support (optional)
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true }
+console_error_panic_hook = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
