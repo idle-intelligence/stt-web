@@ -4,53 +4,41 @@
 Usage:
     python scripts/quantize.py [--output OUTPUT_PATH] [--max-shard-size MB]
 
-Downloads the model from HuggingFace, quantizes all linear layers to Q4_0
+Downloads the model from HuggingFace, quantizes weight matrices to Q4_0
 (4-bit with block size 32), and saves as GGUF. Shards into ≤512MB files
 for browser ArrayBuffer safety margin.
 
 Output: models/stt-1b-en_fr-q4.gguf (or shard-aa, shard-ab, ...)
 
-## Tensor Naming Convention
+## Actual safetensors Tensor Names
 
-The GGUF file uses the following naming scheme to match the model architecture:
+The GGUF file preserves the exact safetensors names from kyutai/stt-1b-en_fr:
 
-**Token Embeddings:**
-- `tok_embeddings.weight` - [text_card, dim] = [8000, 2048]
-
-**Transformer Layers** (16 layers):
-- `layers.{i}.attention_norm.weight` - RMSNorm [dim]
-- `layers.{i}.attention.wq.weight` - Query projection [dim, num_heads * head_dim]
-- `layers.{i}.attention.wk.weight` - Key projection [dim, num_heads * head_dim]
-- `layers.{i}.attention.wv.weight` - Value projection [dim, num_heads * head_dim]
-- `layers.{i}.attention.wo.weight` - Output projection [num_heads * head_dim, dim]
-- `layers.{i}.ffn_norm.weight` - RMSNorm [dim]
-- `layers.{i}.feed_forward.w1.weight` - FFN gate [dim, hidden_dim]
-- `layers.{i}.feed_forward.w2.weight` - FFN down [hidden_dim, dim]
-- `layers.{i}.feed_forward.w3.weight` - FFN up [dim, hidden_dim]
-
-**Depformer Layers** (6 layers):
-- `depformer.layers.{i}.out_norm.weight` - RMSNorm [depformer_dim]
-- `depformer.layers.{i}.linear.weight` - Per-step linear [n_q * card, depformer_dim]
-- `depformer.layers.{i}.sa.in_proj_weight` - Self-attention in_proj [3*depformer_dim, depformer_dim]
-- `depformer.layers.{i}.sa.out_proj.weight` - Self-attention out_proj [depformer_dim, depformer_dim]
-
-**Output:**
-- `output_norm.weight` - Final RMSNorm [dim]
-- `output.weight` - Output projection [dim, text_card]
+**Text Embedding:**
+- `text_emb.weight` - [8001, 2048]
 
 **Audio Embeddings** (32 codebooks):
-- `emb.{i}.weight` - [card, depformer_dim] = [2048, 1024] for each codebook
+- `emb.{0-31}.weight` - [2049, 2048] for each codebook
 
-Where:
-- dim = 2048
-- num_layers = 16
-- num_heads = 16
-- hidden_dim = dim * hidden_scale = 2048 * 4.125 = 8448
-- depformer_dim = 1024
-- depformer_num_layers = 6
-- n_q = 32 (number of codebooks)
-- card = 2048 (codebook size)
-- text_card = 8000 (text vocabulary size)
+**Transformer Layers** (16 layers, i=0..15):
+- `transformer.layers.{i}.norm1.alpha` - [2048] (F32, not quantized)
+- `transformer.layers.{i}.self_attn.in_proj_weight` - [6144, 2048] (Q4)
+- `transformer.layers.{i}.self_attn.out_proj.weight` - [2048, 2048] (Q4)
+- `transformer.layers.{i}.norm2.alpha` - [2048] (F32, not quantized)
+- `transformer.layers.{i}.mlp.gating.linear_in.weight` - [11264, 2048] (Q4)
+- `transformer.layers.{i}.mlp.gating.linear_out.weight` - [2048, 5632] (Q4)
+
+**Output:**
+- `out_norm.alpha` - [2048] (F32, not quantized)
+- `text_linear.weight` - [8000, 2048] (Q4)
+
+**VAD Heads (skipped):**
+- `extra_heads.{0-3}.weight` - [6, 2048] (not needed for STT inference)
+
+Quantization strategy:
+- Q4_0: All weight matrices including embeddings (in_proj, out_proj, linear_in, linear_out, text_linear, emb.*, text_emb)
+- F32: Norm parameters only (norm1.alpha, norm2.alpha, out_norm.alpha)
+- Skipped: extra_heads.* (VAD not used)
 """
 
 import argparse
@@ -208,17 +196,26 @@ def write_gguf_header(f, tensors: List[Tuple[str, torch.Tensor, int]], metadata:
 
 
 def should_quantize(name: str) -> bool:
-    """Determine if a tensor should be quantized to Q4_0 or kept as F32."""
-    # Quantize all weight tensors except norms and embeddings
-    if '.weight' not in name:
+    """Determine if a tensor should be quantized to Q4_0 or kept as F32.
+
+    Returns True for weight matrices to quantize to Q4_0.
+    Returns False for norm parameters (keep F32) and VAD heads (skip).
+    """
+    # Skip VAD heads entirely
+    if name.startswith('extra_heads.'):
         return False
 
-    # Don't quantize normalization layers (small tensors, precision matters)
-    if 'norm' in name:
+    # Keep norm alpha parameters as F32 (small 1D tensors)
+    if '.alpha' in name:
         return False
 
-    # Quantize all other weight tensors (linear layers)
-    return True
+    # Quantize all weight matrices to Q4_0, including embeddings
+    # (emb.*.weight, text_emb.weight, in_proj_weight, out_proj.weight,
+    #  linear_in.weight, linear_out.weight, text_linear.weight)
+    if '.weight' in name:
+        return True
+
+    return False
 
 
 def load_and_quantize_model(model_dir: Path, output_path: Path, max_shard_mb: int = 512):
@@ -246,8 +243,13 @@ def load_and_quantize_model(model_dir: Path, output_path: Path, max_shard_mb: in
     gguf_tensors: List[Tuple[str, torch.Tensor, int]] = []
 
     for name, tensor in sorted(all_tensors.items()):
-        # Map tensor names (adjust based on actual safetensors structure)
-        gguf_name = name  # Default: keep same name
+        # Skip VAD heads (not needed for STT inference)
+        if name.startswith('extra_heads.'):
+            print(f"  SKIP: {name} {list(tensor.shape)}")
+            continue
+
+        # Map tensor names (keep safetensors names as-is)
+        gguf_name = name
 
         # Determine if we should quantize
         if should_quantize(name):
@@ -266,12 +268,10 @@ def load_and_quantize_model(model_dir: Path, output_path: Path, max_shard_mb: in
         "stt.context_length": 750,
         "stt.embedding_length": 2048,
         "stt.block_count": 16,
-        "stt.feed_forward_length": 8448,
+        "stt.feed_forward_length": 5632,
         "stt.attention.head_count": 16,
-        "stt.depformer.embedding_length": 1024,
-        "stt.depformer.block_count": 6,
-        "stt.depformer.attention.head_count": 16,
         "stt.vocab_size": 8000,
+        "stt.audio_vocab_size": 2049,
         "stt.rope.freq_base": 100000.0,
     }
 

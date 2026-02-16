@@ -16,8 +16,11 @@
  *     { type: 'error', message: string }
  */
 
+import { SpmDecoder } from './tokenizer.js';
+
 let engine = null;
 let sttWasm = null;
+let tokenizer = null;
 
 self.onmessage = async (e) => {
     const { type, ...data } = e.data;
@@ -118,6 +121,12 @@ async function cachedFetch(url, label) {
 // ---------------------------------------------------------------------------
 
 async function handleLoad() {
+    // Configuration: HuggingFace model URLs
+    const HF_BASE = 'https://huggingface.co/kyutai/stt-1b-en_fr-q4/resolve/main';
+    const NUM_SHARDS = 4; // Adjust based on actual shard count
+    const MIMI_WEIGHTS_URL = 'https://huggingface.co/kyutai/mimi/resolve/main/model.safetensors';
+    const TOKENIZER_URL = `${HF_BASE}/tokenizer_spm_32k_3.model`;
+
     // 1. Import WASM module.
     self.postMessage({ type: 'status', text: 'Loading WASM module...' });
     sttWasm = await import('/pkg/stt_wasm.js');
@@ -130,57 +139,62 @@ async function handleLoad() {
     // 3. Create engine instance.
     engine = new sttWasm.SttEngine();
 
-    // 4. Discover model shards from the dev server.
-    self.postMessage({ type: 'status', text: 'Discovering model shards...' });
-    const shardsResp = await fetch('/api/shards');
-    if (!shardsResp.ok) {
-        throw new Error('Failed to fetch shard list from /api/shards');
-    }
-    const { shards } = await shardsResp.json();
-
-    if (!shards || shards.length === 0) {
-        throw new Error(
-            'No model shards found on server. Place sharded GGUF files in models/stt-q4-shards/.'
-        );
-    }
-
-    // 5. Download each shard (with caching and progress).
-    for (let i = 0; i < shards.length; i++) {
-        const name = shards[i];
-        const label = `Downloading shard ${i + 1}/${shards.length} (${name})`;
-        const url = `/models/stt-q4-shards/${name}`;
+    // 4. Download model shards from HuggingFace.
+    for (let i = 0; i < NUM_SHARDS; i++) {
+        const name = `stt-1b-en_fr-q4-shard-${i}.gguf`;
+        const url = `${HF_BASE}/${name}`;
+        const label = `Downloading model shard ${i + 1}/${NUM_SHARDS}`;
 
         const buf = await cachedFetch(url, label);
         engine.appendModelShard(new Uint8Array(buf));
     }
 
-    // 6. Load model weights from shards into WebGPU.
+    // 5. Load model weights from shards into WebGPU.
     self.postMessage({ type: 'status', text: 'Loading model into WebGPU...' });
     await engine.loadModel();
 
-    // 7. Signal ready.
+    // 6. Load Mimi codec weights.
+    self.postMessage({ type: 'status', text: 'Loading Mimi codec...' });
+    await engine.loadMimi(MIMI_WEIGHTS_URL);
+
+    // 7. Load tokenizer.
+    self.postMessage({ type: 'status', text: 'Loading tokenizer...' });
+    tokenizer = new SpmDecoder();
+    await tokenizer.load(TOKENIZER_URL);
+
+    // 8. Signal ready.
     self.postMessage({ type: 'status', text: 'Ready', ready: true });
 }
 
 async function handleAudio({ samples }) {
-    if (!engine) return;
+    if (!engine || !tokenizer) return;
 
     // Ensure we have a Float32Array.
     const audioData = samples instanceof Float32Array
         ? samples
         : new Float32Array(samples);
 
-    const text = await engine.feedAudio(audioData);
-    if (text !== undefined && text !== null) {
-        self.postMessage({ type: 'transcript', text, final: false });
+    // feedAudio returns Vec<u32> of text token IDs
+    const tokenIds = await engine.feedAudio(audioData);
+
+    if (tokenIds && tokenIds.length > 0) {
+        const text = tokenizer.decode(Array.from(tokenIds));
+        if (text) {
+            self.postMessage({ type: 'transcript', text, final: false });
+        }
     }
 }
 
 async function handleStop() {
-    if (!engine) return;
+    if (!engine || !tokenizer) return;
 
-    const text = await engine.flush();
-    self.postMessage({ type: 'transcript', text: text || '', final: true });
+    // flush() returns Vec<u32> of remaining text token IDs
+    const tokenIds = await engine.flush();
+    const text = tokenIds && tokenIds.length > 0
+        ? tokenizer.decode(Array.from(tokenIds))
+        : '';
+
+    self.postMessage({ type: 'transcript', text, final: true });
 }
 
 function handleReset() {

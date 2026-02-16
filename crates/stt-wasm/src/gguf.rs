@@ -783,7 +783,7 @@ impl<R: Read + Seek> Q4ModelLoader<R> {
         }
 
         // Output norm
-        let out_norm = self.load_rms_norm("out_norm.weight", 1e-8, device)?;
+        let out_norm = self.load_rms_norm("out_norm.alpha", 1e-8, device)?;
 
         // Text output linear
         let text_linear = self.load_q4_linear("text_linear.weight", device)?;
@@ -810,22 +810,18 @@ impl<R: Read + Seek> Q4ModelLoader<R> {
         config: &SttConfig,
         device: &WgpuDevice,
     ) -> Result<Q4TransformerBlock> {
-        let prefix = format!("layers.{layer_idx}");
+        let prefix = format!("transformer.layers.{layer_idx}");
 
         let attention_norm =
-            self.load_rms_norm(&format!("{prefix}.norm1.weight"), 1e-8, device)?;
+            self.load_rms_norm(&format!("{prefix}.norm1.alpha"), 1e-8, device)?;
 
-        let wq = self.load_q4_linear(&format!("{prefix}.attn.wq.weight"), device)?;
-        let wk = self.load_q4_linear(&format!("{prefix}.attn.wk.weight"), device)?;
-        let wv = self.load_q4_linear(&format!("{prefix}.attn.wv.weight"), device)?;
-        let wo = self.load_q4_linear(&format!("{prefix}.attn.wo.weight"), device)?;
+        let in_proj = self.load_q4_linear(&format!("{prefix}.self_attn.in_proj_weight"), device)?;
+        let out_proj = self.load_q4_linear(&format!("{prefix}.self_attn.out_proj.weight"), device)?;
 
         let head_dim = config.hidden_size / config.num_heads;
         let attention = Q4Attention::new(
-            wq,
-            wk,
-            wv,
-            wo,
+            in_proj,
+            out_proj,
             config.num_heads,
             config.num_kv_heads,
             head_dim,
@@ -833,13 +829,12 @@ impl<R: Read + Seek> Q4ModelLoader<R> {
         );
 
         let ffn_norm =
-            self.load_rms_norm(&format!("{prefix}.norm2.weight"), 1e-8, device)?;
+            self.load_rms_norm(&format!("{prefix}.norm2.alpha"), 1e-8, device)?;
 
-        let w1 = self.load_q4_linear(&format!("{prefix}.ffn.w1.weight"), device)?;
-        let w2 = self.load_q4_linear(&format!("{prefix}.ffn.w2.weight"), device)?;
-        let w3 = self.load_q4_linear(&format!("{prefix}.ffn.w3.weight"), device)?;
+        let linear_in = self.load_q4_linear(&format!("{prefix}.mlp.gating.linear_in.weight"), device)?;
+        let linear_out = self.load_q4_linear(&format!("{prefix}.mlp.gating.linear_out.weight"), device)?;
 
-        let ffn = Q4FeedForward::new(w1, w2, w3);
+        let ffn = Q4FeedForward::new(linear_in, linear_out);
 
         Ok(Q4TransformerBlock::new(
             attention_norm,

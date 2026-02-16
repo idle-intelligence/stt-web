@@ -29,10 +29,12 @@ pub struct SttConfig {
     pub num_heads: usize,
     /// Number of key-value heads (for GQA; same as num_heads for MHA).
     pub num_kv_heads: usize,
-    /// Feed-forward intermediate size (hidden_size * hidden_scale).
+    /// Feed-forward intermediate size.
     pub intermediate_size: usize,
-    /// Text vocabulary size.
+    /// Text output vocabulary size (text_linear out dim).
     pub vocab_size: usize,
+    /// Text input vocabulary size (text_emb rows).
+    pub text_in_vocab_size: usize,
     /// Number of audio codebooks (Mimi).
     pub num_codebooks: usize,
     /// Audio codebook vocabulary size.
@@ -57,10 +59,11 @@ impl Default for SttConfig {
             hidden_size: 2048,
             num_heads: 16,
             num_kv_heads: 16,
-            intermediate_size: 8448, // 2048 * 4.125
+            intermediate_size: 5632,
             vocab_size: 8000,
+            text_in_vocab_size: 8001,
             num_codebooks: 32,
-            audio_vocab_size: 2048,
+            audio_vocab_size: 2049,
             text_delay: 6,
             rope_theta: 100000.0,
             max_seq_len: 4096,

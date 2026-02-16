@@ -5,7 +5,7 @@
 //! - Text token embedding
 //! - RoPE positional embeddings (theta=100000)
 //! - Multi-head attention (MHA, 16 heads)
-//! - SwiGLU feed-forward network
+//! - Gated feed-forward network (2-matrix: linear_in split → SiLU gate * value → linear_out)
 //! - KV cache for autoregressive decoding
 //! - Sliding window attention (750)
 //!
@@ -296,44 +296,50 @@ impl RmsNormLayer {
 // Q4Attention
 // ---------------------------------------------------------------------------
 
-/// Multi-head attention with Q4-quantized weight projections.
+/// Multi-head attention with combined QKV projection.
 ///
-/// Supports both MHA (n_heads == n_kv_heads) and GQA configurations.
+/// The model uses a single `in_proj` weight [3*dim, dim] that produces
+/// concatenated Q, K, V which are then split. Out projection is separate.
 pub struct Q4Attention {
-    wq: Q4Linear,
-    wk: Q4Linear,
-    wv: Q4Linear,
-    wo: Q4Linear,
+    in_proj: Q4Linear,
+    out_proj: Q4Linear,
     n_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
+    dim: usize,
     scale: f32,
     sliding_window: Option<usize>,
 }
 
 impl Q4Attention {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        wq: Q4Linear,
-        wk: Q4Linear,
-        wv: Q4Linear,
-        wo: Q4Linear,
+        in_proj: Q4Linear,
+        out_proj: Q4Linear,
         n_heads: usize,
         n_kv_heads: usize,
         head_dim: usize,
         sliding_window: Option<usize>,
     ) -> Self {
+        let dim = n_heads * head_dim;
         Self {
-            wq,
-            wk,
-            wv,
-            wo,
+            in_proj,
+            out_proj,
             n_heads,
             n_kv_heads,
             head_dim,
+            dim,
             scale: (head_dim as f32).powf(-0.5),
             sliding_window,
         }
+    }
+
+    /// Split combined QKV output into separate Q, K, V tensors.
+    fn split_qkv(&self, qkv: Tensor<Wgpu, 3>) -> (Tensor<Wgpu, 3>, Tensor<Wgpu, 3>, Tensor<Wgpu, 3>) {
+        let [batch, seq, _] = qkv.dims();
+        let q = qkv.clone().slice([0..batch, 0..seq, 0..self.dim]);
+        let k = qkv.clone().slice([0..batch, 0..seq, self.dim..2 * self.dim]);
+        let v = qkv.slice([0..batch, 0..seq, 2 * self.dim..3 * self.dim]);
+        (q, k, v)
     }
 
     /// Forward pass with KV cache.
@@ -346,9 +352,8 @@ impl Q4Attention {
         let [batch, seq_len, _] = x.dims();
         let offset = cache.seq_len();
 
-        let q = self.wq.forward(x.clone());
-        let k = self.wk.forward(x.clone());
-        let v = self.wv.forward(x);
+        let qkv = self.in_proj.forward(x);
+        let (q, k, v) = self.split_qkv(qkv);
 
         let q = q.reshape([batch, seq_len, self.n_heads, self.head_dim]);
         let k = k.reshape([batch, seq_len, self.n_kv_heads, self.head_dim]);
@@ -384,7 +389,7 @@ impl Q4Attention {
 
         let out = out.swap_dims(1, 2);
         let out = out.reshape([batch, seq_len, self.n_heads * self.head_dim]);
-        self.wo.forward(out)
+        self.out_proj.forward(out)
     }
 
     /// Forward pass without KV cache (for prefill).
@@ -396,9 +401,8 @@ impl Q4Attention {
     ) -> Tensor<Wgpu, 3> {
         let [batch, seq_len, _] = x.dims();
 
-        let q = self.wq.forward(x.clone());
-        let k = self.wk.forward(x.clone());
-        let v = self.wv.forward(x);
+        let qkv = self.in_proj.forward(x);
+        let (q, k, v) = self.split_qkv(qkv);
 
         let q = q.reshape([batch, seq_len, self.n_heads, self.head_dim]);
         let k = k.reshape([batch, seq_len, self.n_kv_heads, self.head_dim]);
@@ -427,7 +431,7 @@ impl Q4Attention {
 
         let out = out.swap_dims(1, 2);
         let out = out.reshape([batch, seq_len, self.n_heads * self.head_dim]);
-        self.wo.forward(out)
+        self.out_proj.forward(out)
     }
 
     fn expand_kv(
@@ -457,24 +461,27 @@ impl Q4Attention {
 // Q4FeedForward (SwiGLU)
 // ---------------------------------------------------------------------------
 
-/// SwiGLU MLP with Q4-quantized weights.
+/// Gated MLP with Q4-quantized weights (2-matrix variant).
 ///
-/// Computes `w2(silu(w1(x)) * w3(x))`.
+/// `linear_in` [2*hidden, dim] output is split in half: gate and value.
+/// Forward: `linear_out(silu(gate) * value)`.
 pub struct Q4FeedForward {
-    w1: Q4Linear,
-    w2: Q4Linear,
-    w3: Q4Linear,
+    linear_in: Q4Linear,
+    linear_out: Q4Linear,
 }
 
 impl Q4FeedForward {
-    pub fn new(w1: Q4Linear, w2: Q4Linear, w3: Q4Linear) -> Self {
-        Self { w1, w2, w3 }
+    pub fn new(linear_in: Q4Linear, linear_out: Q4Linear) -> Self {
+        Self { linear_in, linear_out }
     }
 
     pub fn forward(&self, x: Tensor<Wgpu, 3>) -> Tensor<Wgpu, 3> {
-        let gate = silu(self.w1.forward(x.clone()));
-        let up = self.w3.forward(x);
-        self.w2.forward(gate * up)
+        let combined = self.linear_in.forward(x);
+        let [batch, seq, total_dim] = combined.dims();
+        let half = total_dim / 2;
+        let gate = combined.clone().slice([0..batch, 0..seq, 0..half]);
+        let value = combined.slice([0..batch, 0..seq, half..total_dim]);
+        self.linear_out.forward(silu(gate) * value)
     }
 }
 
@@ -484,7 +491,7 @@ impl Q4FeedForward {
 
 /// Pre-LN transformer block with Q4 weights.
 ///
-/// Architecture: RMSNorm → self-attention → residual → RMSNorm → SwiGLU → residual
+/// Architecture: RMSNorm → self-attention → residual → RMSNorm → gated MLP → residual
 pub struct Q4TransformerBlock {
     attention_norm: RmsNormLayer,
     attention: Q4Attention,
