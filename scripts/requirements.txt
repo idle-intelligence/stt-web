@@ -1,0 +1,26 @@
+# Python dependencies for quantization and evaluation scripts
+
+# Core ML libraries
+torch>=2.0.0
+numpy>=1.24.0
+
+# HuggingFace
+huggingface_hub>=0.20.0
+safetensors>=0.4.0
+transformers>=4.35.0
+datasets>=2.14.0
+
+# Kyutai models (if available on PyPI)
+# moshi>=0.2.11
+
+# Evaluation
+jiwer>=3.0.0
+
+# Progress bars
+tqdm>=4.65.0
+
+# Note: Install with:
+#   pip install -r scripts/requirements.txt
+#
+# For moshi, you may need to install from source:
+#   pip install git+https://github.com/kyutai-labs/moshi.git

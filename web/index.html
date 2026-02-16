@@ -7,79 +7,289 @@
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: monospace;
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
             max-width: 800px;
             margin: 0 auto;
             padding: 2rem;
             color: #111;
-            background: #fff;
+            background: #fafafa;
         }
-        h1 { margin-bottom: 0.5rem; }
+        h1 {
+            margin-bottom: 0.5rem;
+            font-size: 2rem;
+            font-weight: 600;
+        }
+        .subtitle {
+            margin-bottom: 2rem;
+            color: #666;
+            font-size: 0.95rem;
+        }
+        .card {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+        .card h2 {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #888;
+            margin-bottom: 1rem;
+        }
         .status {
-            padding: 0.5rem;
-            margin: 1rem 0;
-            background: #f5f5f5;
-            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
             font-size: 0.9rem;
         }
-        .controls { margin: 1rem 0; }
-        button {
-            font-family: monospace;
-            font-size: 1rem;
-            padding: 0.5rem 1.5rem;
-            cursor: pointer;
-            border: 2px solid #111;
-            background: #fff;
-            border-radius: 4px;
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #999;
         }
-        button:hover { background: #f0f0f0; }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .status-dot.loading { background: #f0ad4e; }
+        .status-dot.ready { background: #5cb85c; }
+        .status-dot.error { background: #d9534f; }
+        .status-dot.recording {
+            background: #d9534f;
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .progress {
+            height: 4px;
+            background: #eee;
+            border-radius: 2px;
+            overflow: hidden;
+            margin-bottom: 1rem;
+            display: none;
+        }
+        .progress.visible {
+            display: block;
+        }
+        .progress-bar {
+            height: 100%;
+            background: #007aff;
+            width: 0%;
+            transition: width 0.3s;
+        }
+        .controls {
+            display: flex;
+            gap: 0.5rem;
+        }
+        button {
+            font-family: inherit;
+            font-size: 0.95rem;
+            padding: 0.6rem 1.2rem;
+            cursor: pointer;
+            border: 1px solid #ccc;
+            background: #fff;
+            border-radius: 6px;
+            transition: all 0.15s;
+        }
+        button:hover:not(:disabled) {
+            background: #f5f5f5;
+            border-color: #999;
+        }
+        button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+        button.primary {
+            background: #007aff;
+            color: #fff;
+            border-color: #007aff;
+        }
+        button.primary:hover:not(:disabled) {
+            background: #0051d5;
+            border-color: #0051d5;
+        }
         button.recording {
-            background: #fee;
-            border-color: #c00;
-            color: #c00;
+            background: #d9534f;
+            color: #fff;
+            border-color: #d9534f;
+            animation: pulse 1s infinite;
         }
         #transcript {
-            margin-top: 1rem;
+            margin-top: 0;
             padding: 1rem;
             min-height: 200px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
+            border: 1px solid #eee;
+            border-radius: 6px;
+            background: #f9f9f9;
             white-space: pre-wrap;
             line-height: 1.6;
+            font-size: 0.95rem;
+            color: #111;
+        }
+        #transcript.empty {
+            color: #999;
+            font-style: italic;
+        }
+        .info {
+            font-size: 0.85rem;
+            color: #888;
+            margin-top: 0.5rem;
         }
     </style>
 </head>
 <body>
     <h1>Kyutai STT 1B</h1>
-    <p>Client-side speech-to-text — runs entirely in your browser via WebGPU.</p>
+    <p class="subtitle">Client-side speech-to-text (English + French) — runs entirely in your browser via WebGPU.</p>
 
-    <div class="status" id="status">Initializing...</div>
-
-    <div class="controls">
-        <button id="recordBtn" disabled>Record</button>
-        <button id="resetBtn" disabled>Reset</button>
+    <div class="card">
+        <h2>Status</h2>
+        <div class="status">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Checking browser support...</span>
+        </div>
+        <div class="progress" id="progressBar">
+            <div class="progress-bar" id="progressFill"></div>
+        </div>
+        <p class="info" id="progressInfo"></p>
     </div>
 
-    <div id="transcript"></div>
+    <div class="card">
+        <h2>Controls</h2>
+        <div class="controls">
+            <button id="recordBtn" class="primary" disabled>Start Recording</button>
+            <button id="resetBtn" disabled>Reset</button>
+        </div>
+        <p class="info">Click Start Recording to begin transcription. Your audio stays on this device.</p>
+    </div>
+
+    <div class="card">
+        <h2>Transcript</h2>
+        <div id="transcript" class="empty">Transcript will appear here as you speak...</div>
+    </div>
 
     <script type="module">
-        // TODO: Initialize Web Worker, handle messages, wire up mic + buttons
-        const statusEl = document.getElementById('status');
+        import { SttClient } from './stt-client.js';
+
+        // UI elements
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const progressBar = document.getElementById('progressBar');
+        const progressFill = document.getElementById('progressFill');
+        const progressInfo = document.getElementById('progressInfo');
         const transcriptEl = document.getElementById('transcript');
         const recordBtn = document.getElementById('recordBtn');
         const resetBtn = document.getElementById('resetBtn');
 
+        // State
+        let client = null;
+        let isRecording = false;
+        let transcriptText = '';
+
+        function updateStatus(state, text) {
+            statusDot.className = 'status-dot ' + state;
+            statusText.textContent = text;
+        }
+
+        function formatBytes(bytes) {
+            const mb = bytes / (1024 * 1024);
+            return mb >= 1 ? `${mb.toFixed(1)} MB` : `${(bytes / 1024).toFixed(0)} KB`;
+        }
+
         // Check WebGPU support
         if (!navigator.gpu) {
-            statusEl.textContent = 'WebGPU not supported in this browser. Use Chrome or Edge.';
-            statusEl.style.color = '#c00';
+            updateStatus('error', 'WebGPU not supported. Use Chrome or Edge.');
+            statusText.textContent = 'WebGPU not supported in this browser. Please use Chrome or Edge (version 113+).';
         } else {
-            statusEl.textContent = 'WebGPU available. Loading worker...';
+            // Initialize client
+            client = new SttClient({
+                onStatus: (text, ready, progress) => {
+                    if (ready) {
+                        updateStatus('ready', text);
+                        recordBtn.disabled = false;
+                        resetBtn.disabled = false;
+                        progressBar.classList.remove('visible');
+                        progressInfo.textContent = '';
+                    } else {
+                        updateStatus('loading', text);
 
-            // TODO: Create worker, load WASM, initialize model
-            // const worker = new Worker('worker.js', { type: 'module' });
+                        if (progress) {
+                            progressBar.classList.add('visible');
+                            const percent = progress.total > 0
+                                ? (progress.loaded / progress.total) * 100
+                                : 0;
+                            progressFill.style.width = percent + '%';
+                            progressInfo.textContent = `${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}`;
+                        }
+                    }
+                },
+
+                onTranscript: (text, isFinal) => {
+                    if (text) {
+                        if (isFinal) {
+                            transcriptText += text + ' ';
+                        } else {
+                            transcriptText += text;
+                        }
+                        transcriptEl.textContent = transcriptText;
+                        transcriptEl.classList.remove('empty');
+                    }
+                },
+
+                onError: (err) => {
+                    updateStatus('error', 'Error: ' + err.message);
+                    console.error(err);
+                }
+            });
+
+            // Initialize and load model
+            (async () => {
+                try {
+                    await client.init();
+                } catch (err) {
+                    updateStatus('error', 'Failed to initialize: ' + err.message);
+                    console.error(err);
+                }
+            })();
         }
+
+        // Record button
+        recordBtn.addEventListener('click', async () => {
+            if (!isRecording) {
+                // Start recording
+                try {
+                    await client.startRecording();
+                    isRecording = true;
+                    recordBtn.textContent = 'Stop Recording';
+                    recordBtn.classList.add('recording');
+                    recordBtn.classList.remove('primary');
+                    statusDot.classList.add('recording');
+                    updateStatus('recording', 'Recording...');
+                } catch (err) {
+                    updateStatus('error', 'Microphone error: ' + err.message);
+                    console.error(err);
+                }
+            } else {
+                // Stop recording
+                client.stopRecording();
+                isRecording = false;
+                recordBtn.textContent = 'Start Recording';
+                recordBtn.classList.remove('recording');
+                recordBtn.classList.add('primary');
+                statusDot.classList.remove('recording');
+                updateStatus('ready', 'Ready');
+            }
+        });
+
+        // Reset button
+        resetBtn.addEventListener('click', () => {
+            transcriptText = '';
+            transcriptEl.textContent = 'Transcript will appear here as you speak...';
+            transcriptEl.classList.add('empty');
+            client.reset();
+            updateStatus('ready', 'Ready');
+        });
     </script>
 </body>
 </html>

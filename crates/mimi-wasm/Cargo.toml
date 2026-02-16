@@ -26,11 +26,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 byteorder = { workspace = true }
 safetensors = "0.5"
+ndarray = "0.16"
+num-traits = "0.2"
 
 # WASM support (optional)
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
-web-sys = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true, features = ["Window", "Response", "Request", "RequestInit", "RequestMode"] }
 console_error_panic_hook = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }

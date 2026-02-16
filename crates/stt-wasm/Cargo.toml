@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["wgpu", "native-tokenizer"]
-wgpu = ["burn/wgpu"]
+wgpu = ["burn/wgpu", "burn/template"]
 native-tokenizer = ["tokenizers"]
 wasm = [
     "wgpu",

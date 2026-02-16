@@ -6,20 +6,17 @@
 //! Uses Burn's wgpu backend for GPU inference — works natively (Vulkan/Metal) and
 //! in the browser (WASM + WebGPU).
 
+#[cfg(feature = "wgpu")]
 pub mod model;
 
 #[cfg(feature = "wgpu")]
 pub mod gguf;
 
+#[cfg(feature = "wgpu")]
 pub mod stream;
 
 #[cfg(feature = "wasm")]
 pub mod web;
-
-use burn::backend::wgpu::{Wgpu, WgpuDevice};
-
-/// Backend type alias — wgpu with f32 floats and i32 ints.
-pub type Backend = Wgpu<f32, i32>;
 
 /// Model configuration matching `kyutai/stt-1b-en_fr`.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -30,9 +27,9 @@ pub struct SttConfig {
     pub hidden_size: usize,
     /// Number of attention heads (queries).
     pub num_heads: usize,
-    /// Number of key-value heads (for GQA).
+    /// Number of key-value heads (for GQA; same as num_heads for MHA).
     pub num_kv_heads: usize,
-    /// Feed-forward intermediate size.
+    /// Feed-forward intermediate size (hidden_size * hidden_scale).
     pub intermediate_size: usize,
     /// Text vocabulary size.
     pub vocab_size: usize,
@@ -46,23 +43,29 @@ pub struct SttConfig {
     pub rope_theta: f64,
     /// Maximum sequence length.
     pub max_seq_len: usize,
+    /// Sliding window size for attention.
+    pub sliding_window: usize,
+    /// Text padding token ID.
+    pub text_padding_id: u32,
 }
 
 impl Default for SttConfig {
     fn default() -> Self {
-        // Values for kyutai/stt-1b-en_fr — to be verified against model config.json
+        // Verified values from kyutai/stt-1b-en_fr config.json
         Self {
-            num_layers: 24,
+            num_layers: 16,
             hidden_size: 2048,
-            num_heads: 32,
-            num_kv_heads: 8,
-            intermediate_size: 5632,
-            vocab_size: 32000,
+            num_heads: 16,
+            num_kv_heads: 16,
+            intermediate_size: 8448, // 2048 * 4.125
+            vocab_size: 8000,
             num_codebooks: 32,
             audio_vocab_size: 2048,
             text_delay: 6,
-            rope_theta: 10000.0,
+            rope_theta: 100000.0,
             max_seq_len: 4096,
+            sliding_window: 750,
+            text_padding_id: 3,
         }
     }
 }
