@@ -121,12 +121,6 @@ async function cachedFetch(url, label) {
 // ---------------------------------------------------------------------------
 
 async function handleLoad() {
-    // Configuration: HuggingFace model URLs
-    const HF_BASE = 'https://huggingface.co/kyutai/stt-1b-en_fr-q4/resolve/main';
-    const NUM_SHARDS = 4; // Adjust based on actual shard count
-    const MIMI_WEIGHTS_URL = 'https://huggingface.co/kyutai/mimi/resolve/main/model.safetensors';
-    const TOKENIZER_URL = `${HF_BASE}/tokenizer_spm_32k_3.model`;
-
     // 1. Import WASM module.
     self.postMessage({ type: 'status', text: 'Loading WASM module...' });
     sttWasm = await import('/pkg/stt_wasm.js');
@@ -139,11 +133,21 @@ async function handleLoad() {
     // 3. Create engine instance.
     engine = new sttWasm.SttEngine();
 
-    // 4. Download model shards from HuggingFace.
-    for (let i = 0; i < NUM_SHARDS; i++) {
-        const name = `stt-1b-en_fr-q4-shard-${i}.gguf`;
-        const url = `${HF_BASE}/${name}`;
-        const label = `Downloading model shard ${i + 1}/${NUM_SHARDS}`;
+    // 4. Discover and download model shards.
+    self.postMessage({ type: 'status', text: 'Discovering model shards...' });
+    const shardResp = await fetch('/api/shards');
+    const { shards } = await shardResp.json();
+
+    if (shards.length === 0) {
+        throw new Error(
+            'No model shards found. Run: python scripts/quantize.py'
+        );
+    }
+
+    for (let i = 0; i < shards.length; i++) {
+        const name = shards[i];
+        const url = `/models/stt-1b-en_fr-q4-shards/${name}`;
+        const label = `Downloading shard ${i + 1}/${shards.length}`;
 
         const buf = await cachedFetch(url, label);
         engine.appendModelShard(new Uint8Array(buf));
@@ -151,16 +155,16 @@ async function handleLoad() {
 
     // 5. Load model weights from shards into WebGPU.
     self.postMessage({ type: 'status', text: 'Loading model into WebGPU...' });
-    await engine.loadModel();
+    engine.loadModel();
 
     // 6. Load Mimi codec weights.
     self.postMessage({ type: 'status', text: 'Loading Mimi codec...' });
-    await engine.loadMimi(MIMI_WEIGHTS_URL);
+    await engine.loadMimi('/models/mimi.safetensors');
 
     // 7. Load tokenizer.
     self.postMessage({ type: 'status', text: 'Loading tokenizer...' });
     tokenizer = new SpmDecoder();
-    await tokenizer.load(TOKENIZER_URL);
+    await tokenizer.load('/models/tokenizer_spm_32k_3.model');
 
     // 8. Signal ready.
     self.postMessage({ type: 'status', text: 'Ready', ready: true });

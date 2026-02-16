@@ -33,7 +33,7 @@ const TLS = {
 };
 
 // Discover model shards
-const SHARD_DIR = join(ROOT, "models/stt-q4-shards");
+const SHARD_DIR = join(ROOT, "models/stt-1b-en_fr-q4-shards");
 const shardNames = existsSync(SHARD_DIR)
     ? readdirSync(SHARD_DIR).filter(f => f.startsWith("shard-")).sort()
     : [];
