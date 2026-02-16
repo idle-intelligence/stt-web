@@ -5,37 +5,38 @@
 use crate::tensor::Tensor3;
 use ndarray::{Array1, Array2, Array3, Axis};
 
-/// Multi-head self-attention layer.
-///
-/// Supports combined in_proj (3*d_model, d_model) as used in Mimi safetensors.
+/// Multi-head self-attention layer with separate Q/K/V/O projections.
 #[derive(Clone, Debug)]
 pub struct MultiHeadAttention {
     pub num_heads: usize,
     pub head_dim: usize,
-    /// Combined Q/K/V projection: (3*d_model, d_model)
-    pub in_proj: Array2<f32>,
-    /// Output projection: (d_model, d_model)
-    pub out_proj: Array2<f32>,
+    pub q_proj: Array2<f32>, // (d_model, d_model)
+    pub k_proj: Array2<f32>, // (d_model, d_model)
+    pub v_proj: Array2<f32>, // (d_model, d_model)
+    pub o_proj: Array2<f32>, // (d_model, d_model)
     // KV cache for streaming
     pub k_cache: Option<Array3<f32>>,
     pub v_cache: Option<Array3<f32>>,
 }
 
 impl MultiHeadAttention {
-    /// Create from combined in_proj weight (3*d_model, d_model).
     pub fn new(
         d_model: usize,
         num_heads: usize,
-        in_proj: Array2<f32>,
-        out_proj: Array2<f32>,
+        q_proj: Array2<f32>,
+        k_proj: Array2<f32>,
+        v_proj: Array2<f32>,
+        o_proj: Array2<f32>,
     ) -> Self {
         assert_eq!(d_model % num_heads, 0, "d_model must be divisible by num_heads");
         let head_dim = d_model / num_heads;
         Self {
             num_heads,
             head_dim,
-            in_proj,
-            out_proj,
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
             k_cache: None,
             v_cache: None,
         }
@@ -51,25 +52,28 @@ impl MultiHeadAttention {
         // Transpose: (B, C, T) → (B, T, C)
         let xt = x.transpose_12();
 
-        // Project QKV: for each batch, (T, d_model) @ in_proj.T → (T, 3*d_model)
-        let in_proj_t = self.in_proj.t();
+        // Project Q, K, V separately
+        let q_proj_t = self.q_proj.t();
+        let k_proj_t = self.k_proj.t();
+        let v_proj_t = self.v_proj.t();
 
-        // Compute Q, K, V and reshape to (B*H, T, D)
         let mut q = Array3::<f32>::zeros((batch * num_heads, seq_len, head_dim));
         let mut k = Array3::<f32>::zeros((batch * num_heads, seq_len, head_dim));
         let mut v = Array3::<f32>::zeros((batch * num_heads, seq_len, head_dim));
 
         for b in 0..batch {
             let slice = xt.data.index_axis(Axis(0), b); // (T, d_model)
-            let qkv = slice.dot(&in_proj_t); // (T, 3*d_model)
+            let q_all = slice.dot(&q_proj_t); // (T, d_model)
+            let k_all = slice.dot(&k_proj_t);
+            let v_all = slice.dot(&v_proj_t);
 
             for t in 0..seq_len {
                 for h in 0..num_heads {
                     for d in 0..head_dim {
                         let idx = h * head_dim + d;
-                        q[[b * num_heads + h, t, d]] = qkv[[t, idx]];
-                        k[[b * num_heads + h, t, d]] = qkv[[t, d_model + idx]];
-                        v[[b * num_heads + h, t, d]] = qkv[[t, 2 * d_model + idx]];
+                        q[[b * num_heads + h, t, d]] = q_all[[t, idx]];
+                        k[[b * num_heads + h, t, d]] = k_all[[t, idx]];
+                        v[[b * num_heads + h, t, d]] = v_all[[t, idx]];
                     }
                 }
             }
@@ -139,12 +143,12 @@ impl MultiHeadAttention {
             }
         }
 
-        // Output projection: (B, T, d_model) @ out_proj.T → (B, T, d_model)
-        let out_proj_t = self.out_proj.t();
+        // Output projection: (B, T, d_model) @ o_proj.T → (B, T, d_model)
+        let o_proj_t = self.o_proj.t();
         let mut projected = Array3::<f32>::zeros((batch, seq_len, d_model));
         for b in 0..batch {
             let slice = output.index_axis(Axis(0), b);
-            let result = slice.dot(&out_proj_t);
+            let result = slice.dot(&o_proj_t);
             projected.index_axis_mut(Axis(0), b).assign(&result);
         }
 
@@ -161,8 +165,8 @@ impl MultiHeadAttention {
 /// Feed-forward network.
 #[derive(Clone, Debug)]
 pub struct FeedForward {
-    pub fc1: Array2<f32>, // (d_model, dim_ff)
-    pub fc2: Array2<f32>, // (dim_ff, d_model)
+    pub fc1: Array2<f32>, // (dim_ff, d_model)
+    pub fc2: Array2<f32>, // (d_model, dim_ff)
     pub bias1: Option<Array1<f32>>,
     pub bias2: Option<Array1<f32>>,
 }

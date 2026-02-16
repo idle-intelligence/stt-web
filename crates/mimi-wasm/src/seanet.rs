@@ -16,13 +16,11 @@ pub struct ResidualBlock {
 
 impl ResidualBlock {
     pub fn forward(&self, x: &Tensor3) -> Tensor3 {
-        // Apply first conv with ELU activation
-        let mut residual = self.conv1.forward(x);
-        residual = residual.elu(1.0);
-
-        // Apply second conv with ELU activation
-        residual = self.conv2.forward(&residual);
-        residual = residual.elu(1.0);
+        // SEANet residual block: ELU → Conv1 → ELU → Conv2
+        let residual = x.elu(1.0);
+        let residual = self.conv1.forward(&residual);
+        let residual = residual.elu(1.0);
+        let residual = self.conv2.forward(&residual);
 
         // Add shortcut connection
         match &self.shortcut {
@@ -59,7 +57,8 @@ impl EncoderLayer {
             x = block.forward(&x);
         }
 
-        // Downsample
+        // ELU before downsample
+        x = x.elu(1.0);
         self.downsample.forward(&x)
     }
 
@@ -96,7 +95,8 @@ impl SeaNetEncoder {
             x = layer.forward(&x);
         }
 
-        // Final convolution
+        // ELU before final convolution
+        x = x.elu(1.0);
         self.final_conv.forward(&x)
     }
 
