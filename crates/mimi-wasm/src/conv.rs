@@ -65,37 +65,54 @@ impl Conv1d {
         }
     }
 
-    /// Forward pass (non-streaming).
+    /// Forward pass using im2col + GEMM.
+    ///
+    /// Converts the convolution into a matrix multiply:
+    ///   weight_mat: (out_channels, in_channels * kernel_size)
+    ///   col_mat:    (in_channels * kernel_size, out_time)
+    ///   output = weight_mat . col_mat → (out_channels, out_time)
     pub fn forward(&self, input: &Tensor3) -> Tensor3 {
         let (batch, in_c, time) = input.shape();
         assert_eq!(in_c, self.in_channels(), "Input channels mismatch");
 
         let padding = self.padding();
-        let out_time = (time + padding - self.dilation * (self.kernel_size() - 1)) / self.stride;
+        let ks = self.kernel_size();
+        let out_time = (time + padding - self.dilation * (ks - 1)) / self.stride;
+        let col_rows = in_c * ks;
+
+        // Reshape weight: (out_channels, in_channels, kernel_size) → (out_channels, in_channels * kernel_size)
+        let weight_mat = self.weight
+            .view()
+            .into_shape_with_order((self.out_channels(), col_rows))
+            .expect("weight reshape");
+
         let mut output = Array3::<f32>::zeros((batch, self.out_channels(), out_time));
 
-        // Simplified convolution (not optimized, but correct for small models)
         for b in 0..batch {
-            for out_c in 0..self.out_channels() {
-                for t_out in 0..out_time {
-                    let mut sum = 0.0;
-                    let t_in_start = t_out * self.stride;
+            // Build im2col matrix: (in_channels * kernel_size, out_time)
+            let mut col = Array2::<f32>::zeros((col_rows, out_time));
 
-                    for in_c in 0..self.in_channels() {
-                        for k in 0..self.kernel_size() {
-                            let t_in = t_in_start + k * self.dilation;
-                            if t_in >= padding && t_in - padding < time {
-                                let input_val = input.data[[b, in_c, t_in - padding]];
-                                let weight_val = self.weight[[out_c, in_c, k]];
-                                sum += input_val * weight_val;
-                            }
+            for t_out in 0..out_time {
+                let t_base = t_out * self.stride;
+                for ic in 0..in_c {
+                    let col_offset = ic * ks;
+                    for k in 0..ks {
+                        let t_in = t_base + k * self.dilation;
+                        if t_in >= padding && t_in - padding < time {
+                            col[[col_offset + k, t_out]] = input.data[[b, ic, t_in - padding]];
                         }
                     }
+                }
+            }
 
-                    if let Some(ref bias) = self.bias {
-                        sum += bias[out_c];
-                    }
-                    output[[b, out_c, t_out]] = sum;
+            // GEMM: (out_channels, col_rows) . (col_rows, out_time) → (out_channels, out_time)
+            let result = weight_mat.dot(&col);
+
+            // Copy result + bias
+            for oc in 0..self.out_channels() {
+                let bias_val = self.bias.as_ref().map_or(0.0, |b| b[oc]);
+                for t in 0..out_time {
+                    output[[b, oc, t]] = result[[oc, t]] + bias_val;
                 }
             }
         }
