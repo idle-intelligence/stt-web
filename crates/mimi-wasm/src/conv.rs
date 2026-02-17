@@ -1,6 +1,6 @@
 //! 1D convolution operations for audio processing.
 //!
-//! Implements Conv1d and ConvTranspose1d with streaming support.
+//! Implements Conv1d with streaming support.
 
 use crate::tensor::Tensor3;
 use ndarray::{Array1, Array2, Array3};
