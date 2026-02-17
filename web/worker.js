@@ -240,24 +240,38 @@ async function handleStop() {
     }
     audioBuffer = [];
 
-    const duration = (totalSamples / 24000).toFixed(1);
-    self.postMessage({ type: 'status', text: `Transcribing ${duration}s of audio...` });
-    console.log(`[worker] Batch encoding ${totalSamples} samples (${duration}s)`);
+    const audioDuration = totalSamples / 24000;
+    self.postMessage({ type: 'status', text: `Transcribing ${audioDuration.toFixed(1)}s of audio...` });
+    console.log(`[worker] Batch encoding ${totalSamples} samples (${audioDuration.toFixed(1)}s)`);
 
     // Batch encode + STT in one call
+    const t0 = performance.now();
     const tokenIds = await engine.feedAudio(allAudio);
+    const t1 = performance.now();
     const ids = tokenIds ? Array.from(tokenIds) : [];
     console.log('[worker] feedAudio →', ids.length, 'tokens');
 
     // Flush remaining delayed tokens
     const flushIds = await engine.flush();
+    const t2 = performance.now();
     const fids = flushIds ? Array.from(flushIds) : [];
     console.log('[worker] flush →', fids.length, 'tokens');
+
+    const feedTime = (t1 - t0) / 1000;
+    const flushTime = (t2 - t1) / 1000;
+    const totalTime = (t2 - t0) / 1000;
+    const rtf = {
+        total: totalTime / audioDuration,
+        feed: feedTime / audioDuration,
+        flush: flushTime / audioDuration,
+        audioDuration,
+    };
+    console.log(`[worker] RTF: total=${rtf.total.toFixed(3)} feed=${rtf.feed.toFixed(3)} flush=${rtf.flush.toFixed(3)}`);
 
     const allIds = ids.concat(fids);
     const text = allIds.length > 0 ? tokenizer.decode(allIds) : '';
 
-    self.postMessage({ type: 'transcript', text, final: true });
+    self.postMessage({ type: 'transcript', text, final: true, rtf });
     self.postMessage({ type: 'status', text: 'Ready' });
 }
 

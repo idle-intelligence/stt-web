@@ -88,21 +88,28 @@ impl Tensor3 {
         Self { data }
     }
 
-    /// Multiply each channel by a per-channel scale vector.
+    /// Multiply each channel by a per-channel scale vector (in-place).
     /// scale shape: (channels,), self shape: (batch, channels, time)
-    pub fn scale_channels(&self, scale: &Array1<f32>) -> Self {
+    pub fn scale_channels_inplace(&mut self, scale: &Array1<f32>) {
         let (batch, channels, time) = self.shape();
         assert_eq!(scale.len(), channels);
-        let mut out = self.data.clone();
+        let slice = self.data.as_slice_mut().unwrap();
+        let scale_s = scale.as_slice().unwrap();
         for b in 0..batch {
+            let b_off = b * channels * time;
             for c in 0..channels {
-                let s = scale[c];
+                let s = scale_s[c];
+                let c_off = b_off + c * time;
                 for t in 0..time {
-                    out[[b, c, t]] *= s;
+                    slice[c_off + t] *= s;
                 }
             }
         }
-        Self { data: out }
+    }
+
+    /// In-place addition: self += other
+    pub fn add_assign(&mut self, other: &Tensor3) {
+        self.data += &other.data;
     }
 
     /// Transpose axes 1 and 2: (batch, channels, time) → (batch, time, channels)
@@ -133,27 +140,34 @@ impl Tensor3 {
         Self { data }
     }
 
-    /// Softmax over the last dimension (axis 2).
+    /// Softmax over the last dimension (axis 2), using raw slices for speed.
     pub fn softmax_last(&self) -> Self {
         let (batch, d1, d2) = self.shape();
         let mut out = self.data.clone();
+        let slice = out.as_slice_mut().unwrap();
         for b in 0..batch {
+            let b_off = b * d1 * d2;
             for i in 0..d1 {
+                let row_off = b_off + i * d2;
+                let row = &mut slice[row_off..row_off + d2];
                 // Find max for numerical stability
                 let mut max_val = f32::NEG_INFINITY;
-                for j in 0..d2 {
-                    max_val = max_val.max(out[[b, i, j]]);
+                for &v in row.iter() {
+                    if v > max_val {
+                        max_val = v;
+                    }
                 }
                 // Exp and sum
                 let mut sum = 0.0f32;
-                for j in 0..d2 {
-                    out[[b, i, j]] = (out[[b, i, j]] - max_val).exp();
-                    sum += out[[b, i, j]];
+                for v in row.iter_mut() {
+                    *v = (*v - max_val).exp();
+                    sum += *v;
                 }
                 // Normalize
                 if sum > 0.0 {
-                    for j in 0..d2 {
-                        out[[b, i, j]] /= sum;
+                    let inv_sum = 1.0 / sum;
+                    for v in row.iter_mut() {
+                        *v *= inv_sum;
                     }
                 }
             }

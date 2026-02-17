@@ -138,30 +138,61 @@ impl MultiHeadAttention {
             }
         }
 
-        // Attention scores: Q @ K^T / sqrt(head_dim)
+        // Attention scores: Q @ K^T / sqrt(head_dim), fused with causal mask + softmax
         let scale = 1.0 / (head_dim as f32).sqrt();
         let mut scores = Array3::<f32>::zeros((batch * num_heads, seq_len, seq_len));
+
         for bh in 0..(batch * num_heads) {
-            let q_slice = q.index_axis(Axis(0), bh);
-            let k_slice = k.index_axis(Axis(0), bh);
-            let attn = q_slice.dot(&k_slice.t()) * scale;
+            let q_view = q.index_axis(Axis(0), bh);
+            let k_view = k.index_axis(Axis(0), bh);
+            // GEMM: (seq_len, head_dim) @ (head_dim, seq_len) → (seq_len, seq_len)
+            let attn = q_view.dot(&k_view.t());
             scores.index_axis_mut(Axis(0), bh).assign(&attn);
         }
 
-        // Causal mask: upper triangle = -inf
-        for bh in 0..(batch * num_heads) {
-            for i in 0..seq_len {
-                for j in (i + 1)..seq_len {
-                    scores[[bh, i, j]] = f32::NEG_INFINITY;
+        // Fused: scale + causal mask + softmax (in-place, no clone)
+        {
+            let s = scores.as_slice_mut().unwrap();
+            let total_bh = batch * num_heads;
+            for bh in 0..total_bh {
+                let bh_off = bh * seq_len * seq_len;
+                for i in 0..seq_len {
+                    let row_off = bh_off + i * seq_len;
+                    let row = &mut s[row_off..row_off + seq_len];
+
+                    // Scale + find max over causal positions (j <= i)
+                    let mut max_val = f32::NEG_INFINITY;
+                    for j in 0..=i {
+                        row[j] *= scale;
+                        if row[j] > max_val {
+                            max_val = row[j];
+                        }
+                    }
+
+                    // Exp + sum for causal positions, zero upper triangle
+                    let mut sum = 0.0f32;
+                    for j in 0..=i {
+                        row[j] = (row[j] - max_val).exp();
+                        sum += row[j];
+                    }
+                    for j in (i + 1)..seq_len {
+                        row[j] = 0.0;
+                    }
+
+                    // Normalize
+                    if sum > 0.0 {
+                        let inv_sum = 1.0 / sum;
+                        for j in 0..=i {
+                            row[j] *= inv_sum;
+                        }
+                    }
                 }
             }
         }
 
-        // Softmax over last dim
-        let scores = Tensor3::new(scores).softmax_last();
-
         // Weighted sum: scores @ V → (B*H, T, D)
-        let attn_out = scores.matmul(&Tensor3::new(v));
+        let scores_t3 = Tensor3::new(scores);
+        let attn_out = scores_t3.matmul(&Tensor3::new(v));
 
         // Reshape: (B*H, T, D) → (B, T, d_model) using raw slices
         let mut output = Array3::<f32>::zeros((batch, seq_len, d_model));
@@ -181,17 +212,25 @@ impl MultiHeadAttention {
             }
         }
 
-        // Output projection: (B, T, d_model) @ o_proj.T → (B, T, d_model)
+        // Output projection: (B, T, d_model) @ o_proj.T → (B, d_model, T)
+        // Fused with transpose to avoid intermediate allocation
         let o_proj_t = self.o_proj.t();
-        let mut projected = Array3::<f32>::zeros((batch, seq_len, d_model));
+        let mut result_bct = Array3::<f32>::zeros((batch, d_model, seq_len));
         for b in 0..batch {
-            let slice = output.index_axis(Axis(0), b);
-            let result = slice.dot(&o_proj_t);
-            projected.index_axis_mut(Axis(0), b).assign(&result);
+            let proj_result = output.index_axis(Axis(0), b).dot(&o_proj_t); // (T, d_model)
+            // Transpose (T, d_model) → (d_model, T) directly into output
+            let src = proj_result.as_slice().unwrap();
+            let dst = result_bct.as_slice_mut().unwrap();
+            let b_off = b * d_model * seq_len;
+            for d in 0..d_model {
+                let d_off = b_off + d * seq_len;
+                for t in 0..seq_len {
+                    dst[d_off + t] = src[t * d_model + d];
+                }
+            }
         }
 
-        // Transpose back: (B, T, d_model) → (B, d_model, T)
-        Tensor3::new(projected).transpose_12()
+        Tensor3::new(result_bct)
     }
 
     pub fn reset(&mut self) {
@@ -220,32 +259,42 @@ impl FeedForward {
     }
 
     pub fn forward(&self, x: &Tensor3) -> Tensor3 {
-        let (batch, _d_model, _time) = x.shape();
-        let xt = x.transpose_12(); // (B, T, d_model)
-        let time = xt.data.shape()[1];
+        let (batch, d_model, time) = x.shape();
         let out_dim = self.fc2.shape()[0];
+        let dim_ff = self.fc1.shape()[0];
 
-        let fc1_t = self.fc1.t(); // (d_model, dim_ff)
-        let fc2_t = self.fc2.t(); // (dim_ff, d_model)
-
-        let mut result = Array3::<f32>::zeros((batch, time, out_dim));
+        // Output in (B, d_model, T) format directly to avoid final transpose
+        let mut output = Array3::<f32>::zeros((batch, out_dim, time));
 
         for b in 0..batch {
-            let slice = xt.data.index_axis(Axis(0), b); // (T, d_model)
-
-            // First linear: (T, d_model) @ (d_model, dim_ff) → (T, dim_ff)
-            let mut hidden = slice.dot(&fc1_t);
-
-            if let Some(ref bias) = self.bias1 {
-                let dim_ff = hidden.shape()[1];
-                for i in 0..time {
-                    for j in 0..dim_ff {
-                        hidden[[i, j]] += bias[j];
+            // Build (T, d_model) view from (B, d_model, T) using raw slices
+            let mut x_bt = Array2::<f32>::zeros((time, d_model));
+            {
+                let src = x.data.as_slice().unwrap();
+                let dst = x_bt.as_slice_mut().unwrap();
+                let b_off = b * d_model * time;
+                for t in 0..time {
+                    for d in 0..d_model {
+                        dst[t * d_model + d] = src[b_off + d * time + t];
                     }
                 }
             }
 
-            // GELU activation (hoist constant)
+            // First linear: (T, d_model) @ fc1.T → (T, dim_ff)
+            let mut hidden = x_bt.dot(&self.fc1.t());
+
+            if let Some(ref bias) = self.bias1 {
+                let bias_s = bias.as_slice().unwrap();
+                let h_s = hidden.as_slice_mut().unwrap();
+                for t in 0..time {
+                    let t_off = t * dim_ff;
+                    for j in 0..dim_ff {
+                        h_s[t_off + j] += bias_s[j];
+                    }
+                }
+            }
+
+            // GELU activation
             const GELU_COEFF: f32 = 0.7978845608; // sqrt(2/pi)
             let h_slice = hidden.as_slice_mut().unwrap();
             for v in h_slice.iter_mut() {
@@ -253,22 +302,35 @@ impl FeedForward {
                 *v = x * 0.5 * (1.0 + (GELU_COEFF * (x + 0.044715 * x * x * x)).tanh());
             }
 
-            // Second linear: (T, dim_ff) @ (dim_ff, d_model) → (T, d_model)
-            let mut output = hidden.dot(&fc2_t);
+            // Second linear: (T, dim_ff) @ fc2.T → (T, d_model)
+            let result = hidden.dot(&self.fc2.t());
 
-            if let Some(ref bias) = self.bias2 {
-                for i in 0..time {
-                    for j in 0..out_dim {
-                        output[[i, j]] += bias[j];
+            // Transpose result (T, d_model) → output (d_model, T) directly
+            {
+                let src = result.as_slice().unwrap();
+                let dst = output.as_slice_mut().unwrap();
+                let b_off = b * out_dim * time;
+                if let Some(ref bias) = self.bias2 {
+                    let bias_s = bias.as_slice().unwrap();
+                    for d in 0..out_dim {
+                        let bias_val = bias_s[d];
+                        let d_off = b_off + d * time;
+                        for t in 0..time {
+                            dst[d_off + t] = src[t * out_dim + d] + bias_val;
+                        }
+                    }
+                } else {
+                    for d in 0..out_dim {
+                        let d_off = b_off + d * time;
+                        for t in 0..time {
+                            dst[d_off + t] = src[t * out_dim + d];
+                        }
                     }
                 }
             }
-
-            result.index_axis_mut(Axis(0), b).assign(&output);
         }
 
-        // Transpose back: (B, T, d_model) → (B, d_model, T)
-        Tensor3::new(result).transpose_12()
+        Tensor3::new(output)
     }
 }
 
@@ -342,19 +404,21 @@ impl TransformerLayer {
         // norm_first = true: norm -> attn -> scale -> residual -> norm -> ff -> scale -> residual
         let normed = self.norm1.forward(x);
         let mut attn_out = self.attn.forward(&normed);
+
         if let Some(ref scale) = self.layer_scale_1 {
-            attn_out = attn_out.scale_channels(scale);
+            attn_out.scale_channels_inplace(scale);
         }
-        let x = x + &attn_out;
+        attn_out.add_assign(x); // in-place residual: attn_out += x
 
-        let normed = self.norm2.forward(&x);
+        let normed = self.norm2.forward(&attn_out);
         let mut ff_out = self.ff.forward(&normed);
-        if let Some(ref scale) = self.layer_scale_2 {
-            ff_out = ff_out.scale_channels(scale);
-        }
-        let x = &x + &ff_out;
 
-        x
+        if let Some(ref scale) = self.layer_scale_2 {
+            ff_out.scale_channels_inplace(scale);
+        }
+        ff_out.add_assign(&attn_out); // in-place residual: ff_out += attn_out
+
+        ff_out
     }
 
     pub fn reset(&mut self) {
@@ -376,8 +440,13 @@ impl Transformer {
 
     /// Forward pass through all layers.
     pub fn forward(&self, x: &Tensor3) -> Tensor3 {
-        let mut x = x.clone();
-        for layer in &self.layers {
+        if self.layers.is_empty() {
+            return x.clone();
+        }
+
+        // First layer takes a reference, avoiding the initial clone
+        let mut x = self.layers[0].forward(x);
+        for layer in &self.layers[1..] {
             x = layer.forward(&x);
         }
         x

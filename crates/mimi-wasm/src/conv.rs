@@ -12,6 +12,8 @@ pub struct Conv1d {
     pub weight: Array3<f32>,
     /// Pre-reshaped weight matrix: (out_channels, in_channels * kernel_size)
     weight_mat: Array2<f32>,
+    /// Per-kernel-position weight matrices for direct conv: weight[:, :, k] → (out_c, in_c)
+    kernel_weights: Vec<Array2<f32>>,
     /// Bias vector: (out_channels,)
     pub bias: Option<Array1<f32>>,
     pub stride: usize,
@@ -40,16 +42,31 @@ impl Conv1d {
         let kernel_size = weight.shape()[2];
         let col_rows = in_channels * kernel_size;
 
-        // Pre-compute the reshaped weight matrix
+        // Pre-compute the reshaped weight matrix (for im2col path)
         let weight_mat = weight
             .view()
             .into_shape_with_order((out_channels, col_rows))
             .expect("weight reshape")
             .to_owned();
 
+        // Pre-compute per-kernel-position weight matrices (for direct conv path)
+        // Used for both stride=1 and strided convolutions when dilation=1
+        let kernel_weights = if dilation == 1 && kernel_size > 1 {
+            (0..kernel_size)
+                .map(|k| {
+                    weight
+                        .slice(ndarray::s![.., .., k])
+                        .to_owned()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         Self {
             weight,
             weight_mat,
+            kernel_weights,
             bias,
             stride,
             dilation,
@@ -86,54 +103,154 @@ impl Conv1d {
         }
     }
 
-    /// Forward pass using im2col + GEMM.
+    /// Forward pass for 1D convolution.
     ///
-    /// Converts the convolution into a matrix multiply:
-    ///   weight_mat: (out_channels, in_channels * kernel_size)
-    ///   col_mat:    (in_channels * kernel_size, out_time)
-    ///   output = weight_mat . col_mat → (out_channels, out_time)
+    /// Uses one of three strategies:
+    /// - kernel_size=1: direct matmul (no im2col)
+    /// - stride=1, dilation=1: direct conv via partial matmuls (avoids huge im2col allocation)
+    /// - general: im2col + GEMM
     pub fn forward(&self, input: &Tensor3) -> Tensor3 {
         let (batch, in_c, time) = input.shape();
         assert_eq!(in_c, self.in_channels, "Input channels mismatch");
 
-        let padding = self.padding();
         let ks = self.kernel_size;
         let out_c = self.out_channels;
+
+        // Special case: kernel_size=1, stride=1, dilation=1 → direct matmul
+        if ks == 1 && self.stride == 1 && self.dilation == 1 {
+            return self.forward_1x1(input, batch, in_c, time, out_c);
+        }
+
+        // Direct conv via partial matmuls: avoids allocating huge im2col matrix.
+        // Only use when im2col would be large (>1M floats = 4MB) and in_c is
+        // large enough that per-kernel GEMMs are efficient.
+        let padding = self.padding();
+        let stride = self.stride;
+        let dilation = self.dilation;
+        let out_time = (time + padding - dilation * (ks - 1)) / stride;
+        let col_size = in_c * ks * out_time;
+
+        if stride == 1 && dilation == 1 && !self.kernel_weights.is_empty()
+            && col_size > 1_000_000 && in_c >= 4
+        {
+            return self.forward_direct(input, batch, in_c, time, out_c);
+        }
+
+        // General im2col path
+        self.forward_im2col(input, batch, in_c, time, out_c)
+    }
+
+    /// Direct convolution via partial matmuls (stride=1, dilation=1).
+    ///
+    /// Instead of building a (in_c*ks, out_time) im2col matrix, performs ks
+    /// separate matmuls with offset input views and accumulates results.
+    /// This eliminates the massive im2col allocation that dominates memory
+    /// for long sequences (e.g. 553MB for layer[0] at 30s audio).
+    fn forward_direct(
+        &self,
+        input: &Tensor3,
+        batch: usize,
+        in_c: usize,
+        time: usize,
+        out_c: usize,
+    ) -> Tensor3 {
+        let ks = self.kernel_size;
+        let padding = self.padding();
+        let out_time = time; // stride=1, dilation=1 → out_time = time
+
+        let mut output = Array3::<f32>::zeros((batch, out_c, out_time));
+
+        // For very thin matrices (in_c < 4), fall back to im2col since
+        // per-kernel-position GEMMs would have too much overhead.
+        if in_c < 4 {
+            return self.forward_im2col(input, batch, in_c, time, out_c);
+        }
+
+        for b in 0..batch {
+            let input_b = input.data.index_axis(ndarray::Axis(0), b); // (in_c, time)
+
+            for k in 0..ks {
+                let weight_k = &self.kernel_weights[k]; // (out_c, in_c)
+
+                // Valid output range: t_out where input[t_out + k - padding] is in bounds
+                let t_start = padding.saturating_sub(k);
+                let t_end = out_time.min(time + padding - k);
+
+                if t_start >= t_end {
+                    continue;
+                }
+
+                let input_start = t_start + k - padding;
+                let len = t_end - t_start;
+
+                // Slice input view: (in_c, len) — no allocation, just a view
+                let input_slice =
+                    input_b.slice(ndarray::s![.., input_start..input_start + len]);
+
+                // GEMM: (out_c, in_c) @ (in_c, len) → (out_c, len)
+                let result = weight_k.dot(&input_slice);
+
+                // Accumulate into output
+                let mut out_slice =
+                    output.slice_mut(ndarray::s![b, .., t_start..t_end]);
+                out_slice += &result;
+            }
+        }
+
+        // Add bias
+        if let Some(ref bias) = self.bias {
+            let bias_slice = bias.as_slice().unwrap();
+            let output_slice = output.as_slice_mut().unwrap();
+            for b in 0..batch {
+                for oc in 0..out_c {
+                    let bias_val = bias_slice[oc];
+                    let base = (b * out_c + oc) * out_time;
+                    for t in 0..out_time {
+                        output_slice[base + t] += bias_val;
+                    }
+                }
+            }
+        }
+
+        Tensor3::new(output)
+    }
+
+    /// Forward pass using im2col + GEMM (for stride > 1 or dilation > 1).
+    fn forward_im2col(
+        &self,
+        input: &Tensor3,
+        batch: usize,
+        in_c: usize,
+        time: usize,
+        out_c: usize,
+    ) -> Tensor3 {
+        let padding = self.padding();
+        let ks = self.kernel_size;
         let stride = self.stride;
         let dilation = self.dilation;
         let out_time = (time + padding - dilation * (ks - 1)) / stride;
         let col_rows = in_c * ks;
 
-        // Special case: kernel_size=1, stride=1, dilation=1 → direct matmul
-        if ks == 1 && stride == 1 && dilation == 1 {
-            return self.forward_1x1(input, batch, in_c, time, out_c);
-        }
-
         let mut output = Array3::<f32>::zeros((batch, out_c, out_time));
-
-        // Get raw slice access to input data for faster indexing
         let input_slice = input.data.as_slice().unwrap();
 
         for b in 0..batch {
             let b_input_offset = b * in_c * time;
 
-            // Build im2col matrix: (col_rows, out_time) using raw slices
             let mut col = Array2::<f32>::zeros((col_rows, out_time));
             let col_slice = col.as_slice_mut().unwrap();
 
             if dilation == 1 && stride == 1 {
-                // Highly optimized path for stride=1, dilation=1: bulk memcpy
-                // For each (ic, k), the valid output range is contiguous in input
+                // Bulk memcpy path for stride=1, dilation=1
                 for ic in 0..in_c {
                     let ic_input_base = b_input_offset + ic * time;
                     let col_ic_base = ic * ks;
                     for k in 0..ks {
                         let col_row = col_ic_base + k;
                         let col_row_base = col_row * out_time;
-                        // t_in = t_out + k, valid when t_out + k >= padding
-                        // AND t_out + k - padding < time
                         let t_start = if k >= padding { 0 } else { padding - k };
-                        let t_end_limit = if time + padding >= k { time + padding - k } else { 0 };
+                        let t_end_limit =
+                            if time + padding >= k { time + padding - k } else { 0 };
                         let t_end = out_time.min(t_end_limit);
                         if t_start < t_end {
                             let len = t_end - t_start;
@@ -145,17 +262,18 @@ impl Conv1d {
                     }
                 }
             } else if dilation == 1 {
-                // Optimized path for dilation=1 with stride > 1: bulk copy per row
+                // Stride > 1 path
                 for ic in 0..in_c {
                     let ic_input_base = b_input_offset + ic * time;
                     let col_ic_base = ic * ks;
                     for k in 0..ks {
                         let col_row = col_ic_base + k;
                         let col_row_base = col_row * out_time;
-                        // For stride > 1: t_in = t_out * stride + k
-                        // valid when: t_out * stride + k >= padding
-                        // AND t_out * stride + k - padding < time
-                        let t_start = if k >= padding { 0 } else { (padding - k + stride - 1) / stride };
+                        let t_start = if k >= padding {
+                            0
+                        } else {
+                            (padding - k + stride - 1) / stride
+                        };
                         let t_end = if time + padding > k {
                             ((time + padding - k - 1) / stride + 1).min(out_time)
                         } else {
@@ -169,7 +287,6 @@ impl Conv1d {
                     }
                 }
             } else {
-                // General path with dilation
                 for t_out in 0..out_time {
                     let t_base = t_out * stride;
                     for ic in 0..in_c {
@@ -187,10 +304,8 @@ impl Conv1d {
                 }
             }
 
-            // GEMM: (out_channels, col_rows) . (col_rows, out_time) → (out_channels, out_time)
             let result = self.weight_mat.dot(&col);
 
-            // Copy result + bias using raw slices
             let result_slice = result.as_slice().unwrap();
             let output_slice = output.as_slice_mut().unwrap();
             let b_output_offset = b * out_c * out_time;
@@ -209,7 +324,8 @@ impl Conv1d {
                 }
                 None => {
                     let src = &result_slice[..out_c * out_time];
-                    let dst = &mut output_slice[b_output_offset..b_output_offset + out_c * out_time];
+                    let dst =
+                        &mut output_slice[b_output_offset..b_output_offset + out_c * out_time];
                     dst.copy_from_slice(src);
                 }
             }

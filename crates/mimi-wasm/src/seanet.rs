@@ -19,15 +19,19 @@ impl ResidualBlock {
         let mut residual = x.elu(1.0);
         residual = self.conv1.forward(&residual);
         residual.elu_inplace(1.0);
-        let residual = self.conv2.forward(&residual);
+        let mut residual = self.conv2.forward(&residual);
 
-        // Add shortcut connection
+        // Add shortcut connection (in-place to avoid allocation)
         match &self.shortcut {
             Some(shortcut) => {
                 let shortcut_out = shortcut.forward(x);
-                &residual + &shortcut_out
+                residual.add_assign(&shortcut_out);
+                residual
             }
-            None => &residual + x,
+            None => {
+                residual.add_assign(x);
+                residual
+            }
         }
     }
 
@@ -49,12 +53,16 @@ pub struct EncoderLayer {
 
 impl EncoderLayer {
     pub fn forward(&self, x: &Tensor3) -> Tensor3 {
-        let mut x = x.clone();
-
-        // Apply residual blocks
-        for block in &self.residual_blocks {
-            x = block.forward(&x);
-        }
+        // Apply residual blocks (each returns new tensor, no need to clone input)
+        let mut x = if self.residual_blocks.is_empty() {
+            x.clone()
+        } else {
+            let mut result = self.residual_blocks[0].forward(x);
+            for block in &self.residual_blocks[1..] {
+                result = block.forward(&result);
+            }
+            result
+        };
 
         // ELU before downsample
         x.elu_inplace(1.0);

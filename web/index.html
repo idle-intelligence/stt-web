@@ -142,6 +142,13 @@
             color: #888;
             margin-top: 0.5rem;
         }
+        #rtfInfo {
+            font-size: 0.8rem;
+            color: #888;
+            margin-top: 0.5rem;
+            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -179,6 +186,7 @@
     <div class="card">
         <h2>Transcript</h2>
         <div id="transcript" class="empty">Transcript will appear here as you speak...</div>
+        <div id="rtfInfo"></div>
     </div>
 
     <script type="module">
@@ -191,6 +199,7 @@
         const progressFill = document.getElementById('progressFill');
         const progressInfo = document.getElementById('progressInfo');
         const transcriptEl = document.getElementById('transcript');
+        const rtfInfoEl = document.getElementById('rtfInfo');
         const recordBtn = document.getElementById('recordBtn');
         const fileBtn = document.getElementById('fileBtn');
         const fileInput = document.getElementById('fileInput');
@@ -247,7 +256,7 @@
                     }
                 },
 
-                onTranscript: (text, isFinal) => {
+                onTranscript: (text, isFinal, rtf) => {
                     if (text) {
                         if (isFinal) {
                             transcriptText += text + ' ';
@@ -256,6 +265,12 @@
                         }
                         transcriptEl.textContent = transcriptText;
                         transcriptEl.classList.remove('empty');
+                    }
+                    if (isFinal && rtf) {
+                        const speedup = (1 / rtf.total).toFixed(1);
+                        const faster = rtf.total < 1.0 ? ` — ${speedup}x faster than real-time` : '';
+                        rtfInfoEl.textContent = `RTF: ${rtf.total.toFixed(2)}x (feed: ${rtf.feed.toFixed(2)}x, flush: ${rtf.flush.toFixed(2)}x, audio: ${rtf.audioDuration.toFixed(1)}s)${faster}`;
+                        rtfInfoEl.style.display = 'block';
                     }
                 },
 
@@ -390,6 +405,8 @@
             transcriptText = '';
             transcriptEl.textContent = 'Transcript will appear here as you speak...';
             transcriptEl.classList.add('empty');
+            rtfInfoEl.style.display = 'none';
+            rtfInfoEl.textContent = '';
             client.reset();
             updateStatus('ready', 'Ready');
         });

@@ -239,7 +239,7 @@ export class SttClient {
                 break;
 
             case 'transcript':
-                this.onTranscript(data.text, data.final || false);
+                this.onTranscript(data.text, data.final || false, data.rtf || null);
                 break;
 
             case 'error':

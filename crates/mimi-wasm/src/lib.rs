@@ -540,9 +540,8 @@ impl MimiCodec {
     pub fn encode_all(&mut self, samples: &[f32]) -> Vec<u32> {
         let time = samples.len();
         let mut data = Array3::<f32>::zeros((1, 1, time));
-        for (i, &sample) in samples.iter().enumerate() {
-            data[[0, 0, i]] = sample;
-        }
+        let data_slice = data.as_slice_mut().unwrap();
+        data_slice[..time].copy_from_slice(samples);
         let input = Tensor3::new(data);
 
         // Full pipeline in one shot

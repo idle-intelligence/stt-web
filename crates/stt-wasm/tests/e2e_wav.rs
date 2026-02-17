@@ -162,10 +162,14 @@ fn test_e2e_wav_to_text() {
             .expect("Failed to create Mimi codec");
 
         // Encode all audio at once (batch mode — avoids frame-boundary artifacts)
+        let mimi_start = std::time::Instant::now();
         let flat_tokens = mimi.encode_all(&samples);
+        let mimi_elapsed = mimi_start.elapsed().as_secs_f64();
         let num_codebooks = 32;
         let num_frames = flat_tokens.len() / num_codebooks;
+        let mimi_rtf = mimi_elapsed / duration_s;
         println!("Mimi produced {} frames ({} tokens)", num_frames, flat_tokens.len());
+        println!("Mimi RTF: {:.3}x ({:.3}s processing / {:.2}s audio)", mimi_rtf, mimi_elapsed, duration_s);
 
         // Reshape flat tokens to frames of 32
         let mut mimi_frames: Vec<Vec<u32>> = Vec::new();
@@ -199,6 +203,7 @@ fn test_e2e_wav_to_text() {
         let mut stream = SttStream::new(config.clone(), config.num_layers);
         let mut all_tokens: Vec<u32> = Vec::new();
 
+        let stt_start = std::time::Instant::now();
         for (i, frame) in mimi_frames.iter().enumerate() {
             let token = stream.feed_frame(frame, &model).await;
             if let Some(t) = token {
@@ -212,6 +217,11 @@ fn test_e2e_wav_to_text() {
         // Flush
         let flush_tokens = stream.flush(&model).await;
         all_tokens.extend(&flush_tokens);
+        let stt_elapsed = stt_start.elapsed().as_secs_f64();
+        let stt_rtf = stt_elapsed / duration_s;
+        let total_rtf = (mimi_elapsed + stt_elapsed) / duration_s;
+        println!("STT RTF:   {:.3}x ({:.3}s processing / {:.2}s audio)", stt_rtf, stt_elapsed, duration_s);
+        println!("Total RTF: {:.3}x (Mimi: {:.3}x, STT: {:.3}x)", total_rtf, mimi_rtf, stt_rtf);
 
         // === Step 4: Decode to text ===
         println!("\n=== Step 4: Decode tokens ===");
@@ -273,10 +283,14 @@ fn test_e2e_wav_bria() {
         let mut mimi = mimi_wasm::MimiCodec::new(mimi_weights_path).await
             .expect("Failed to create Mimi codec");
 
+        let mimi_start = std::time::Instant::now();
         let flat_tokens = mimi.encode_all(&samples);
+        let mimi_elapsed = mimi_start.elapsed().as_secs_f64();
         let num_codebooks = 32;
         let num_frames = flat_tokens.len() / num_codebooks;
+        let mimi_rtf = mimi_elapsed / duration_s;
         println!("Mimi: {} frames from {:.2}s audio", num_frames, duration_s);
+        println!("Mimi RTF: {:.3}x ({:.3}s processing / {:.2}s audio)", mimi_rtf, mimi_elapsed, duration_s);
 
         let mut mimi_frames: Vec<Vec<u32>> = Vec::new();
         for f in 0..num_frames {
@@ -300,6 +314,7 @@ fn test_e2e_wav_bria() {
         let mut all_tokens: Vec<u32> = Vec::new();
 
         println!("Running STT on {} frames...", num_frames);
+        let stt_start = std::time::Instant::now();
         for (i, frame) in mimi_frames.iter().enumerate() {
             let token = stream.feed_frame(frame, &model).await;
             if let Some(t) = token {
@@ -312,6 +327,11 @@ fn test_e2e_wav_bria() {
 
         let flush_tokens = stream.flush(&model).await;
         all_tokens.extend(&flush_tokens);
+        let stt_elapsed = stt_start.elapsed().as_secs_f64();
+        let stt_rtf = stt_elapsed / duration_s;
+        let total_rtf = (mimi_elapsed + stt_elapsed) / duration_s;
+        println!("STT RTF:   {:.3}x ({:.3}s processing / {:.2}s audio)", stt_rtf, stt_elapsed, duration_s);
+        println!("Total RTF: {:.3}x (Mimi: {:.3}x, STT: {:.3}x)", total_rtf, mimi_rtf, stt_rtf);
 
         // === Decode ===
         let transcript = decode_tokens(&vocab, &all_tokens);
