@@ -644,36 +644,11 @@ impl SttModel {
         cache.reset();
     }
 
-    /// Debug: compute the embedding sum for given tokens WITHOUT running the transformer.
-    /// Returns shape [1, 1, hidden_size].
-    pub fn debug_embedding(&self, audio_tokens: &[u32], text_token: u32) -> Tensor<Wgpu, 3> {
-        let dim = self.config.hidden_size;
-        let mut sum = vec![0.0f32; dim];
-        for (i, &token) in audio_tokens.iter().enumerate() {
-            self.audio_emb[i].embed_id_add_cpu(token, &mut sum);
-        }
-        self.text_emb.embed_id_add_cpu(text_token, &mut sum);
-        Tensor::<Wgpu, 3>::from_data(
-            burn::tensor::TensorData::new(sum, [1, 1, dim]),
-            &self.device,
-        )
-    }
-
     pub fn config(&self) -> &SttConfig {
         &self.config
     }
 
     pub fn device(&self) -> &WgpuDevice {
         &self.device
-    }
-
-    /// Accessor for audio embedding stores (used by diagnose()).
-    pub fn audio_emb_ref(&self) -> &[EmbeddingStore] {
-        &self.audio_emb
-    }
-
-    /// Accessor for text embedding store (used by diagnose()).
-    pub fn text_emb_ref(&self) -> &EmbeddingStore {
-        &self.text_emb
     }
 }
