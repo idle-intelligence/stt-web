@@ -90,7 +90,7 @@ self.onmessage = (e) => {
 // Cache helpers
 // ---------------------------------------------------------------------------
 
-const CACHE_NAME = 'kyutai-stt-model-v1';
+const CACHE_NAME = 'stt-model-v1';
 
 /**
  * Fetch a URL with caching via the Cache API.

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Dev server for Kyutai STT browser demo.
+ * Dev server for STT browser demo.
  *
  * Serves the web app, WASM pkg, and model shards.
  *
@@ -96,7 +96,7 @@ const server = createServer((req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-    console.log(`\nKyutai STT dev server running:`);
+    console.log(`\nSTT dev server running:`);
     console.log(`  Local:   http://localhost:${PORT}`);
     console.log(`\nModel: ${MODEL_FILE}\n`);
 });
