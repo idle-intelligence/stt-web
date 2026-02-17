@@ -54,9 +54,6 @@ struct SessionMetrics {
     total_mimi_ms: f64,
     total_stt_ms: f64,
     total_ms: f64,
-    // Last call values (for debugging)
-    last_mimi_ms: f64,
-    last_stt_ms: f64,
 }
 
 impl SessionMetrics {
@@ -71,8 +68,6 @@ impl SessionMetrics {
             total_mimi_ms: 0.0,
             total_stt_ms: 0.0,
             total_ms: 0.0,
-            last_mimi_ms: 0.0,
-            last_stt_ms: 0.0,
         }
     }
 
@@ -295,21 +290,6 @@ impl SttEngine {
         let mut text_tokens = Vec::new();
         let mimi_frames = tokens.len() / num_codebooks;
 
-        // Log first Mimi frame tokens for debugging
-        if mimi_frames > 0 && self.metrics.total_frames == 0 {
-            let first_frame = &tokens[..num_codebooks.min(tokens.len())];
-            wasm_log(&format!(
-                "[stt] First Mimi frame ({} tokens): {:?}",
-                first_frame.len(), first_frame
-            ));
-        } else if mimi_frames > 0 && self.metrics.total_frames < 5 {
-            let first_frame = &tokens[..num_codebooks.min(tokens.len())];
-            wasm_log(&format!(
-                "[stt] Mimi frame #{} tokens: {:?}",
-                self.metrics.total_frames + 1, first_frame
-            ));
-        }
-
         let t_stt_start = now_ms();
         for frame_start in (0..tokens.len()).step_by(num_codebooks) {
             if frame_start + num_codebooks > tokens.len() {
@@ -341,16 +321,14 @@ impl SttEngine {
         self.metrics.total_mimi_ms += mimi_ms;
         self.metrics.total_stt_ms += stt_ms;
         self.metrics.total_ms += total_call_ms;
-        self.metrics.last_mimi_ms = mimi_ms;
-        self.metrics.last_stt_ms = stt_ms;
 
         Ok(text_tokens)
     }
 
-    /// Get timing metrics from the last feedAudio call and session-level stats.
+    /// Get timing metrics from the session.
     ///
     /// Returns a JS object: `{ mimi_encode_ms, stt_forward_ms, total_ms,
-    ///   mimi_frames, stt_tokens, ttfb_ms, total_frames }`
+    ///   total_frames, total_tokens, ttfb_ms }`
     #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = getMetrics))]
     pub fn get_metrics(&self) -> JsValue {
         let obj = js_sys::Object::new();
@@ -363,9 +341,6 @@ impl SttEngine {
         set("total_frames", self.metrics.total_frames as f64);
         set("total_tokens", self.metrics.total_tokens as f64);
         set("ttfb_ms", self.metrics.ttfb_ms());
-        // Last-call values for debugging
-        set("last_mimi_ms", self.metrics.last_mimi_ms);
-        set("last_stt_ms", self.metrics.last_stt_ms);
         obj.into()
     }
 
