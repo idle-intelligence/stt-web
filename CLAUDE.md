@@ -24,8 +24,8 @@ cargo test --features "wgpu"
 cargo clippy --features "wgpu,cli" -- -D warnings
 cargo clippy --no-default-features --features wasm --target wasm32-unknown-unknown -- -D warnings
 
-# E2E browser test
-bunx playwright test tests/e2e_browser.spec.ts
+# Rust integration tests (under crates/stt-wasm/tests/ and crates/mimi-wasm/tests/)
+cargo test --features "wgpu" -- --test-threads=1
 
 # Quantization and evaluation (Python)
 python scripts/quantize.py   # safetensors → Q4 GGUF
@@ -51,7 +51,7 @@ crates/
 web/
   index.html          # standalone demo page (no bundler)
   worker.js           # Web Worker: loads WASM, orchestrates pipeline
-  audio-processor.js  # AudioWorklet: mic → 16kHz mono PCM chunks
+  audio-processor.js  # AudioWorklet: mic → 24kHz mono PCM chunks
   stt-client.js       # optional JS embedding API
 scripts/              # quantize.py, eval.py, gen-cert.sh
 tests/reference/      # shared test fixtures (wav, tokens, transcripts)
@@ -99,7 +99,7 @@ hub = ["hf-hub"]
 ## Architecture: Inference Pipeline
 
 ```
-Microphone → AudioWorklet (16kHz mono PCM)
+Microphone → AudioWorklet (24kHz mono PCM)
   → Web Worker
     → Mimi codec [WASM, CPU] (PCM → 32 codebook tokens per frame at 12.5Hz)
       → STT Transformer [WASM+WebGPU] (audio tokens + prev text token → next text token)

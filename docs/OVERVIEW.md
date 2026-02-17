@@ -140,10 +140,8 @@ stt-web/
 │   ├── eval.py                # WER evaluation script
 │   └── gen-cert.sh            # self-signed cert for local HTTPS dev
 ├── tests/
-│   ├── reference/             # test audio files + expected transcripts
-│   ├── test_mimi.rs           # mimi codec correctness tests
-│   ├── test_model.rs          # model inference tests (native)
-│   └── e2e_browser.spec.ts    # Playwright end-to-end browser test
+│   └── reference/             # test audio files + expected transcripts
+│                              # (Rust integration tests live under crates/*/tests/)
 └── README.md
 ```
 
