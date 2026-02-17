@@ -13,6 +13,7 @@ use burn::backend::wgpu::WgpuDevice;
 use crate::gguf::Q4ModelLoader;
 use crate::model::SttModel;
 use crate::stream::SttStream;
+use crate::tokenizer::SpmDecoder;
 use crate::SttConfig;
 
 /// Device initialized by `initWgpuDevice()` — used by `SttEngine` instances.
@@ -162,6 +163,7 @@ pub struct SttEngine {
     model: Option<SttModel>,
     stream: Option<SttStream>,
     mimi: Option<mimi_wasm::MimiCodec>,
+    tokenizer: Option<SpmDecoder>,
     config: SttConfig,
     device: WgpuDevice,
     shard_bufs: Vec<Vec<u8>>,
@@ -184,6 +186,7 @@ impl SttEngine {
             model: None,
             stream: None,
             mimi: None,
+            tokenizer: None,
             config: SttConfig::default(),
             device,
             shard_bufs: Vec::new(),
@@ -252,13 +255,25 @@ impl SttEngine {
         Ok(())
     }
 
+    /// Load the SentencePiece tokenizer from a `.model` file URL.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = loadTokenizer))]
+    pub async fn load_tokenizer(&mut self, url: &str) -> Result<(), JsError> {
+        wasm_log(&format!("[stt] Loading tokenizer from {url}..."));
+        let decoder = SpmDecoder::load(url)
+            .await
+            .map_err(|e| JsError::new(&format!("Failed to load tokenizer: {e}")))?;
+        wasm_log(&format!("[stt] Tokenizer loaded: {} vocab entries", decoder.vocab_len()));
+        self.tokenizer = Some(decoder);
+        Ok(())
+    }
+
     /// Feed PCM audio samples (f32, 24kHz mono for Mimi).
     ///
-    /// Returns transcript text tokens if any new tokens were produced.
-    /// Audio goes through: Mimi codec → STT transformer → text tokens.
+    /// Returns decoded transcript text if any new tokens were produced.
+    /// Audio goes through: Mimi codec → STT transformer → text tokens → detokenize.
     /// Per-call timing is stored in metrics (retrieve via `getMetrics()`).
     #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = feedAudio))]
-    pub async fn feed_audio(&mut self, samples: &[f32]) -> Result<Vec<u32>, JsError> {
+    pub async fn feed_audio(&mut self, samples: &[f32]) -> Result<String, JsError> {
         let t_start = now_ms();
 
         // Track first audio arrival for TTFB
@@ -322,7 +337,15 @@ impl SttEngine {
         self.metrics.total_stt_ms += stt_ms;
         self.metrics.total_ms += total_call_ms;
 
-        Ok(text_tokens)
+        // Decode token IDs to text
+        let text = if let Some(ref tok) = self.tokenizer {
+            tok.decode(&text_tokens)
+        } else {
+            // Fallback: return token IDs as comma-separated string
+            text_tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",")
+        };
+
+        Ok(text)
     }
 
     /// Get timing metrics from the session.
@@ -346,7 +369,7 @@ impl SttEngine {
 
     /// Flush remaining text after end of speech.
     #[cfg_attr(target_family = "wasm", wasm_bindgen)]
-    pub async fn flush(&mut self) -> Result<Vec<u32>, JsError> {
+    pub async fn flush(&mut self) -> Result<String, JsError> {
         let model = self
             .model
             .as_ref()
@@ -357,7 +380,14 @@ impl SttEngine {
             .ok_or_else(|| JsError::new("Stream not initialized."))?;
 
         let tokens = stream.flush(model).await;
-        Ok(tokens)
+
+        let text = if let Some(ref tok) = self.tokenizer {
+            tok.decode(&tokens)
+        } else {
+            tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",")
+        };
+
+        Ok(text)
     }
 
     /// Reset all state for a new recording session.
@@ -375,7 +405,7 @@ impl SttEngine {
     /// Check if the model is loaded and ready.
     #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = isReady))]
     pub fn is_ready(&self) -> bool {
-        self.model.is_some() && self.mimi.is_some()
+        self.model.is_some() && self.mimi.is_some() && self.tokenizer.is_some()
     }
 }
 

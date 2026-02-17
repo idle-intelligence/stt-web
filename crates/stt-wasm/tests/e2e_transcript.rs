@@ -10,6 +10,7 @@ use burn::backend::wgpu::WgpuDevice;
 
 use stt_wasm::gguf::Q4ModelLoader;
 use stt_wasm::stream::SttStream;
+use stt_wasm::tokenizer::SpmDecoder;
 use stt_wasm::SttConfig;
 
 fn device() -> WgpuDevice {
@@ -24,142 +25,6 @@ struct MimiTokens {
 #[derive(serde::Deserialize)]
 struct TextTokens {
     tokens: Vec<u32>,
-}
-
-/// Minimal SentencePiece .model parser (protobuf).
-/// Extracts piece strings and maps token_id (= index) → piece.
-fn load_sentencepiece_vocab(path: &std::path::Path) -> Vec<String> {
-    let data = std::fs::read(path).expect("Failed to read tokenizer model");
-    let mut pieces = Vec::new();
-    let mut pos = 0;
-
-    while pos < data.len() {
-        let (tag, tag_len) = read_varint(&data, pos);
-        pos += tag_len;
-
-        let field_num = tag >> 3;
-        let wire_type = tag & 0x7;
-
-        if field_num == 1 && wire_type == 2 {
-            // Field 1 (repeated SentencePiece), length-delimited
-            let (len, len_len) = read_varint(&data, pos);
-            pos += len_len;
-
-            let piece_bytes = &data[pos..pos + len as usize];
-            let piece = parse_sentence_piece(piece_bytes);
-            pieces.push(piece);
-
-            pos += len as usize;
-        } else {
-            pos = skip_field(&data, pos, wire_type as u8);
-        }
-    }
-
-    pieces
-}
-
-fn parse_sentence_piece(buf: &[u8]) -> String {
-    let mut pos = 0;
-    let mut piece = String::new();
-
-    while pos < buf.len() {
-        let (tag, tag_len) = read_varint(buf, pos);
-        pos += tag_len;
-
-        let field_num = tag >> 3;
-        let wire_type = tag & 0x7;
-
-        if field_num == 1 && wire_type == 2 {
-            let (len, len_len) = read_varint(buf, pos);
-            pos += len_len;
-            piece = String::from_utf8_lossy(&buf[pos..pos + len as usize]).to_string();
-            pos += len as usize;
-        } else {
-            pos = skip_field(buf, pos, wire_type as u8);
-        }
-    }
-
-    piece
-}
-
-fn read_varint(buf: &[u8], start: usize) -> (u64, usize) {
-    let mut value: u64 = 0;
-    let mut shift = 0;
-    let mut pos = start;
-
-    while pos < buf.len() {
-        let byte = buf[pos];
-        pos += 1;
-        value |= ((byte & 0x7f) as u64) << shift;
-        shift += 7;
-        if byte & 0x80 == 0 {
-            break;
-        }
-    }
-
-    (value, pos - start)
-}
-
-fn skip_field(buf: &[u8], pos: usize, wire_type: u8) -> usize {
-    match wire_type {
-        0 => {
-            // Varint
-            let mut p = pos;
-            while p < buf.len() && buf[p] & 0x80 != 0 {
-                p += 1;
-            }
-            p + 1
-        }
-        1 => pos + 8,  // 64-bit
-        2 => {
-            // Length-delimited
-            let (len, len_len) = read_varint(buf, pos);
-            pos + len_len + len as usize
-        }
-        5 => pos + 4,  // 32-bit
-        _ => pos + 1,  // Unknown, skip 1 byte
-    }
-}
-
-/// Decode token IDs to text using the sentencepiece vocabulary.
-fn decode_tokens(vocab: &[String], token_ids: &[u32]) -> String {
-    let mut pieces = Vec::new();
-    let mut byte_buffer: Vec<u8> = Vec::new();
-
-    let flush_bytes = |byte_buffer: &mut Vec<u8>, pieces: &mut Vec<String>| {
-        if !byte_buffer.is_empty() {
-            if let Ok(s) = String::from_utf8(byte_buffer.clone()) {
-                pieces.push(s);
-            }
-            byte_buffer.clear();
-        }
-    };
-
-    for &id in token_ids {
-        // Skip special tokens
-        if id == 0 || id == 3 {
-            continue;
-        }
-
-        if let Some(piece) = vocab.get(id as usize) {
-            // Detect byte fallback tokens: <0xHH>
-            if piece.starts_with("<0x") && piece.ends_with('>') && piece.len() == 6 {
-                if let Ok(byte_val) = u8::from_str_radix(&piece[3..5], 16) {
-                    byte_buffer.push(byte_val);
-                    continue;
-                }
-            }
-
-            flush_bytes(&mut byte_buffer, &mut pieces);
-            pieces.push(piece.clone());
-        }
-    }
-
-    flush_bytes(&mut byte_buffer, &mut pieces);
-
-    // Join and convert SentencePiece underscores to spaces
-    let text = pieces.join("");
-    text.replace('\u{2581}', " ").trim().to_string()
 }
 
 #[test]
@@ -189,8 +54,8 @@ fn test_e2e_full_transcript() {
         println!("Expected: {:?}...", &expected_transcript[..80.min(expected_transcript.len())]);
 
         // Load tokenizer vocabulary
-        let vocab = load_sentencepiece_vocab(tokenizer_path);
-        println!("Loaded tokenizer: {} vocab entries", vocab.len());
+        let tokenizer = SpmDecoder::load(tokenizer_path.to_str().unwrap()).await.unwrap();
+        println!("Loaded tokenizer: {} vocab entries", tokenizer.vocab_len());
 
         // Load model
         let device = device();
@@ -245,10 +110,10 @@ fn test_e2e_full_transcript() {
         println!("Total predicted tokens: {}", predicted_tokens.len());
 
         // Decode predicted tokens to text
-        let predicted_text = decode_tokens(&vocab, &predicted_tokens);
+        let predicted_text = tokenizer.decode(&predicted_tokens);
 
         // Also decode reference tokens for comparison
-        let ref_text = decode_tokens(&vocab, &text_data.tokens);
+        let ref_text = tokenizer.decode(&text_data.tokens);
 
         println!("\n=== PREDICTED TRANSCRIPT ===");
         println!("{}", predicted_text);

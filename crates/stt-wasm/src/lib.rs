@@ -15,6 +15,8 @@ pub mod gguf;
 #[cfg(feature = "wgpu")]
 pub mod stream;
 
+pub mod tokenizer;
+
 #[cfg(feature = "wasm")]
 pub mod web;
 
