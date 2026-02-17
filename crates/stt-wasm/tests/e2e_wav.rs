@@ -582,3 +582,167 @@ fn test_e2e_streaming_bria() {
         println!("\n=== STREAMING E2E BRIA TEST PASSED ===");
     });
 }
+
+#[test]
+fn test_profiling_all() {
+    pollster::block_on(async {
+        let mimi_weights_path = "../../models/mimi.safetensors";
+        let gguf_path = std::path::Path::new("../../models/stt-1b-en_fr-q4.gguf");
+        let tokenizer_path = std::path::Path::new("../../models/tokenizer.model");
+
+        if !gguf_path.exists() || !std::path::Path::new(mimi_weights_path).exists() {
+            println!("Skipping: model files not found");
+            return;
+        }
+
+        // Load models once
+        let vocab = load_sentencepiece_vocab(tokenizer_path);
+        let device = WgpuDevice::default();
+        let config = SttConfig::default();
+        let file_data = std::fs::read(gguf_path).unwrap();
+        let mut loader = Q4ModelLoader::from_shards(vec![file_data]).unwrap();
+        let parts = loader.load_deferred(&device, &config).unwrap();
+        drop(loader);
+        let model = parts.finalize(&device).unwrap();
+
+        let test_files = vec![
+            "test-loona.wav",
+            "test-bria-3s.wav",
+            "test-bria-5s.wav",
+            "test-bria-10s.wav",
+            "test-bria-10s-noisy.wav",
+            "test-bria.wav",
+            "test-crepes-fr-10s.wav",
+            "test-crepes-fr.wav",
+            "test-silence-60s.wav",
+            "test-bria-120s.wav",
+        ];
+
+        println!("\n{:=<100}", "");
+        println!("STREAMING PROFILING BENCHMARK");
+        println!("{:=<100}\n", "");
+
+        let mut results = Vec::new();
+
+        for file_name in &test_files {
+            let wav_path = std::path::Path::new("../../web").join(file_name);
+            if !wav_path.exists() {
+                println!("Skipping {}: not found", file_name);
+                continue;
+            }
+
+            // Read WAV
+            let reader = hound::WavReader::open(&wav_path).expect("Failed to open WAV");
+            let spec = reader.spec();
+            let samples: Vec<f32> = match spec.sample_format {
+                hound::SampleFormat::Float => {
+                    reader.into_samples::<f32>().map(|s| s.unwrap()).collect()
+                }
+                hound::SampleFormat::Int => {
+                    let bits = spec.bits_per_sample;
+                    let max_val = (1 << (bits - 1)) as f32;
+                    reader.into_samples::<i32>().map(|s| s.unwrap() as f32 / max_val).collect()
+                }
+            };
+            let duration_s = samples.len() as f64 / spec.sample_rate as f64;
+
+            // Fresh Mimi + STT stream
+            let mut mimi = mimi_wasm::MimiCodec::new(mimi_weights_path).await
+                .expect("Failed to create Mimi codec");
+            let mut stream = SttStream::new(config.clone(), config.num_layers);
+
+            let chunk_size = 2400;
+            let num_codebooks = config.num_codebooks;
+            let mut all_tokens: Vec<u32> = Vec::new();
+            let mut mimi_times: Vec<f64> = Vec::new();
+            let mut stt_times: Vec<f64> = Vec::new();
+            let mut total_frames = 0usize;
+
+            let wall_start = std::time::Instant::now();
+
+            for chunk_start in (0..samples.len()).step_by(chunk_size) {
+                let chunk_end = (chunk_start + chunk_size).min(samples.len());
+                let chunk = &samples[chunk_start..chunk_end];
+
+                // Time Mimi encode
+                let mimi_start = std::time::Instant::now();
+                let tokens = mimi.feed_audio(chunk);
+                let mimi_elapsed = mimi_start.elapsed().as_secs_f64() * 1000.0;
+
+                let mimi_frames = tokens.len() / num_codebooks;
+                if mimi_frames > 0 {
+                    let per_frame_mimi = mimi_elapsed / mimi_frames as f64;
+                    for _ in 0..mimi_frames {
+                        mimi_times.push(per_frame_mimi);
+                    }
+                }
+
+                // Time STT forward for each frame
+                for frame_start in (0..tokens.len()).step_by(num_codebooks) {
+                    if frame_start + num_codebooks > tokens.len() { break; }
+                    let frame = &tokens[frame_start..frame_start + num_codebooks];
+                    total_frames += 1;
+
+                    let stt_start = std::time::Instant::now();
+                    if let Some(token) = stream.feed_frame(frame, &model).await {
+                        all_tokens.push(token);
+                    }
+                    let stt_elapsed = stt_start.elapsed().as_secs_f64() * 1000.0;
+                    stt_times.push(stt_elapsed);
+                }
+            }
+
+            // Flush
+            let flush_start = std::time::Instant::now();
+            let flush_tokens = stream.flush(&model).await;
+            let flush_ms = flush_start.elapsed().as_secs_f64() * 1000.0;
+            all_tokens.extend(&flush_tokens);
+
+            let wall_elapsed = wall_start.elapsed().as_secs_f64();
+            let rtf = wall_elapsed / duration_s;
+
+            // Percentile helper
+            fn percentile(sorted: &[f64], p: f64) -> f64 {
+                if sorted.is_empty() { return 0.0; }
+                let idx = (p / 100.0 * (sorted.len() - 1) as f64).round() as usize;
+                sorted[idx.min(sorted.len() - 1)]
+            }
+
+            let mut mimi_sorted = mimi_times.clone();
+            mimi_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mut stt_sorted = stt_times.clone();
+            stt_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+            let mimi_avg = if mimi_sorted.is_empty() { 0.0 } else { mimi_sorted.iter().sum::<f64>() / mimi_sorted.len() as f64 };
+            let stt_avg = if stt_sorted.is_empty() { 0.0 } else { stt_sorted.iter().sum::<f64>() / stt_sorted.len() as f64 };
+
+            let transcript = decode_tokens(&vocab, &all_tokens);
+
+            println!("--- {} ({:.1}s, {} frames) ---", file_name, duration_s, total_frames);
+            println!("  Mimi:  avg={:.1}ms  p50={:.1}ms  p95={:.1}ms  p99={:.1}ms",
+                mimi_avg, percentile(&mimi_sorted, 50.0), percentile(&mimi_sorted, 95.0), percentile(&mimi_sorted, 99.0));
+            println!("  STT:   avg={:.1}ms  p50={:.1}ms  p95={:.1}ms  p99={:.1}ms",
+                stt_avg, percentile(&stt_sorted, 50.0), percentile(&stt_sorted, 95.0), percentile(&stt_sorted, 99.0));
+            println!("  Total: avg={:.1}ms/frame  RTF={:.3}x  flush={:.1}ms",
+                mimi_avg + stt_avg, rtf, flush_ms);
+            println!("  Text:  \"{}\"", if transcript.len() > 80 { format!("{}...", &transcript[..80]) } else { transcript.clone() });
+            println!();
+
+            results.push((file_name.to_string(), duration_s, total_frames, mimi_avg, stt_avg, rtf));
+        }
+
+        // Summary table
+        println!("\n{:=<100}", "");
+        println!("SUMMARY TABLE");
+        println!("{:=<100}", "");
+        println!("{:<25} {:>6} {:>6} {:>10} {:>10} {:>10} {:>8}",
+            "File", "Dur", "Frames", "Mimi ms", "STT ms", "Total ms", "RTF");
+        println!("{:-<85}", "");
+        for (name, dur, frames, mimi, stt, rtf) in &results {
+            println!("{:<25} {:>5.1}s {:>6} {:>9.1}ms {:>9.1}ms {:>9.1}ms {:>7.3}x",
+                name, dur, frames, mimi, stt, mimi + stt, rtf);
+        }
+        println!("{:-<85}", "");
+        println!("\nBudget: 80ms/frame for real-time (12.5Hz)\n");
+    });
+}

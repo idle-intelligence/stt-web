@@ -26,11 +26,8 @@ const MIME = {
     ".bin":  "application/octet-stream",
 };
 
-// Discover model shards
-const SHARD_DIR = join(ROOT, "models/stt-1b-en_fr-q4-shards");
-const shardNames = existsSync(SHARD_DIR)
-    ? readdirSync(SHARD_DIR).filter(f => f.startsWith("shard-")).sort()
-    : [];
+// Model file (single GGUF, no sharding needed — 531MB is well under 2GB WASM limit)
+const MODEL_FILE = "stt-1b-en_fr-q4.gguf";
 
 const server = createServer((req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
@@ -43,10 +40,10 @@ const server = createServer((req, res) => {
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
     res.setHeader("Pragma", "no-cache");
 
-    // API: list available shards
+    // API: list model files (single GGUF)
     if (pathname === "/api/shards") {
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ shards: shardNames }));
+        res.end(JSON.stringify({ shards: [MODEL_FILE] }));
         return;
     }
 
@@ -104,5 +101,5 @@ const server = createServer((req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
     console.log(`\nKyutai STT dev server running:`);
     console.log(`  Local:   http://localhost:${PORT}`);
-    console.log(`\nModel shards: ${shardNames.length} (${SHARD_DIR})\n`);
+    console.log(`\nModel: ${MODEL_FILE}\n`);
 });

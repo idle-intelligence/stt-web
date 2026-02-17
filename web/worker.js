@@ -175,34 +175,34 @@ async function handleLoad(config) {
     // 3. Create engine instance.
     engine = new sttWasm.SttEngine();
 
-    // 4. Discover and download model shards.
-    self.postMessage({ type: 'status', text: 'Discovering model shards...' });
+    // 4. Download model weights.
+    self.postMessage({ type: 'status', text: 'Downloading model...' });
 
-    let shards;
+    let modelFiles;
     if (config.shardList && config.shardList.length > 0) {
-        shards = config.shardList;
+        modelFiles = config.shardList;
     } else {
-        const shardResp = await fetch(base + '/api/shards');
-        const shardData = await shardResp.json();
-        shards = shardData.shards;
+        const resp = await fetch(base + '/api/shards');
+        const data = await resp.json();
+        modelFiles = data.shards;
     }
 
-    if (shards.length === 0) {
+    if (modelFiles.length === 0) {
         throw new Error(
-            'No model shards found. Run: python scripts/quantize.py'
+            'No model files found. Run: python scripts/quantize.py'
         );
     }
 
-    for (let i = 0; i < shards.length; i++) {
-        const name = shards[i];
-        const url = base + `/models/stt-1b-en_fr-q4-shards/${name}`;
-        const label = `Downloading shard ${i + 1}/${shards.length}`;
+    for (let i = 0; i < modelFiles.length; i++) {
+        const name = modelFiles[i];
+        const url = base + `/models/${name}`;
+        const label = `Downloading model${modelFiles.length > 1 ? ` (${i + 1}/${modelFiles.length})` : ''}`;
 
         const buf = await cachedFetch(url, label);
         engine.appendModelShard(new Uint8Array(buf));
     }
 
-    // 5. Load model weights from shards into WebGPU.
+    // 5. Load model weights into WebGPU.
     self.postMessage({ type: 'status', text: 'Loading model into WebGPU...' });
     engine.loadModel();
 
