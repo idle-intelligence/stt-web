@@ -1,21 +1,21 @@
-# Kyutai STT 1B → Browser (WASM + WebGPU)
+# STT 1B → Browser (WASM + WebGPU)
 
 ## What we're building
 
-A browser-native, fully client-side speech-to-text engine based on Kyutai's `stt-1b-en_fr` model. No server, no API keys, no data leaves the device. The user opens a web page, the model downloads once (~500MB, cached), and from then on they have real-time streaming transcription from their microphone — entirely in their browser tab.
+A browser-native, fully client-side speech-to-text engine based on the `stt-1b-en_fr` model. No server, no API keys, no data leaves the device. The user opens a web page, the model downloads once (~500MB, cached), and from then on they have real-time streaming transcription from their microphone — entirely in their browser tab.
 
 ## Why this model
 
-Kyutai STT 1B is the sweet spot:
+STT 1B is the sweet spot:
 
 | Model | Params | Browser-viable? | Streaming? | Quality |
 |---|---|---|---|---|
 | Whisper base | 73M | ✅ trivial (~200MB) | ❌ chunked | decent |
 | Moonshine Base | ~400M | ✅ easy (~150MB) | ✅ | good |
-| **Kyutai STT 1B** | **1B** | **✅ feasible (~500MB Q4)** | **✅ native streaming** | **excellent** |
+| **STT 1B** | **1B** | **✅ feasible (~500MB Q4)** | **✅ native streaming** | **excellent** |
 | Voxtral Realtime 4B | 4B | 🟡 tight (~2.5GB Q4) | ✅ | SOTA |
 
-Kyutai STT 1B uses "delayed streams modeling" — audio and text are modeled as parallel time-aligned streams. This means the model is *natively* streaming: it starts outputting text ~500ms after speech begins, with no chunking hacks. It includes a semantic VAD (voice activity detection) that predicts when the user has stopped talking. English + French. CC-BY 4.0 license.
+STT 1B uses "delayed streams modeling" — audio and text are modeled as parallel time-aligned streams. This means the model is *natively* streaming: it starts outputting text ~500ms after speech begins, with no chunking hacks. It includes a semantic VAD (voice activity detection) that predicts when the user has stopped talking. English + French. CC-BY 4.0 license.
 
 ## Architecture
 
@@ -115,7 +115,7 @@ The project produces two things:
 
 ### 2. Code repository
 ```
-kyutai-stt-browser/
+stt-web/
 ├── CLAUDE.md                  # project context for Claude Code agents
 ├── Cargo.toml                 # workspace: mimi-wasm + stt-wasm crates
 ├── crates/
