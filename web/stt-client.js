@@ -98,6 +98,7 @@ export class SttClient {
                 sampleRate: 24000,
                 echoCancellation: true,
                 noiseSuppression: true,
+                autoGainControl: true,
             }
         });
 

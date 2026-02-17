@@ -130,19 +130,29 @@ impl RoPE {
 pub struct KVCache {
     pub k: Option<Tensor<Wgpu, 4>>,
     pub v: Option<Tensor<Wgpu, 4>>,
+    /// Absolute position counter (total tokens seen). Used for RoPE.
+    offset: usize,
 }
 
 impl KVCache {
     pub fn new() -> Self {
-        Self { k: None, v: None }
+        Self { k: None, v: None, offset: 0 }
     }
 
     /// Update cache with new K, V and return full sequences.
+    ///
+    /// If `max_len` is set, the cache is truncated to at most `max_len`
+    /// entries (keeping the most recent ones). This prevents O(n²) growth
+    /// for sliding-window attention where old entries are masked anyway.
     pub fn update(
         &mut self,
         k: Tensor<Wgpu, 4>,
         v: Tensor<Wgpu, 4>,
+        max_len: Option<usize>,
     ) -> (Tensor<Wgpu, 4>, Tensor<Wgpu, 4>) {
+        let new_seq_len = k.dims()[2];
+        self.offset += new_seq_len;
+
         let k_full = match &self.k {
             None => {
                 self.k = Some(k.clone());
@@ -165,7 +175,27 @@ impl KVCache {
                 full
             }
         };
+
+        // Truncate to max_len if cache exceeds it.
+        if let Some(max) = max_len {
+            let cur_len = k_full.dims()[2];
+            if cur_len > max {
+                let start = cur_len - max;
+                let [b, h, _s, d] = k_full.dims();
+                let k_trunc = k_full.slice([0..b, 0..h, start..cur_len, 0..d]);
+                let v_trunc = v_full.slice([0..b, 0..h, start..cur_len, 0..d]);
+                self.k = Some(k_trunc.clone());
+                self.v = Some(v_trunc.clone());
+                return (k_trunc, v_trunc);
+            }
+        }
+
         (k_full, v_full)
+    }
+
+    /// Absolute position (total tokens seen). Used for RoPE encoding.
+    pub fn offset(&self) -> usize {
+        self.offset
     }
 
     pub fn seq_len(&self) -> usize {
@@ -175,6 +205,7 @@ impl KVCache {
     pub fn reset(&mut self) {
         self.k = None;
         self.v = None;
+        self.offset = 0;
     }
 }
 
@@ -243,6 +274,11 @@ fn apply_sliding_window_mask_with_offset(
     window: usize,
     offset: usize,
 ) -> Tensor<Wgpu, 4> {
+    // If KV cache has been truncated to the window, all entries are within
+    // range — no masking needed. Also covers the initial fill-up phase.
+    if kv_len <= window + 1 {
+        return scores;
+    }
     if offset + q_len <= window + 1 {
         return scores;
     }
@@ -335,7 +371,8 @@ impl Q4Attention {
         cache: &mut KVCache,
     ) -> Tensor<Wgpu, 3> {
         let [batch, seq_len, _] = x.dims();
-        let offset = cache.seq_len();
+        // Use absolute offset for RoPE (not cache.seq_len(), which shrinks after truncation).
+        let offset = cache.offset();
 
         let qkv = self.in_proj.forward(x);
         let (q, k, v) = self.split_qkv(qkv);
@@ -350,7 +387,11 @@ impl Q4Attention {
         let k = k.swap_dims(1, 2);
         let v = v.swap_dims(1, 2);
 
-        let (k, v) = cache.update(k, v);
+        // Truncate cache to sliding_window + 1 entries (entries beyond the
+        // window are masked to -inf in attention, so keeping them just wastes
+        // memory and makes Tensor::cat O(n) per frame → O(n²) total).
+        let max_cache = self.sliding_window.map(|w| w + 1);
+        let (k, v) = cache.update(k, v, max_cache);
         let total_seq_len = cache.seq_len();
 
         // Expand K, V for GQA if needed

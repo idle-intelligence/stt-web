@@ -16,11 +16,8 @@
  *     { type: 'error', message: string }
  */
 
-import { SpmDecoder } from './tokenizer.js';
-
 let engine = null;
 let sttWasm = null;
-let tokenizer = null;
 let totalSamples = 0;
 let recordingStart = 0;
 
@@ -210,11 +207,10 @@ async function handleLoad(config) {
     const mimiUrl = config.mimiUrl || (base + '/models/mimi.safetensors');
     await engine.loadMimi(mimiUrl);
 
-    // 7. Load tokenizer.
+    // 7. Load tokenizer (into WASM engine).
     self.postMessage({ type: 'status', text: 'Loading tokenizer...' });
     const tokenizerUrl = config.tokenizerUrl || (base + '/models/tokenizer.model');
-    tokenizer = new SpmDecoder();
-    await tokenizer.load(tokenizerUrl);
+    await engine.loadTokenizer(tokenizerUrl);
 
     // 8. Signal ready.
     logState('Model loaded, ready to receive audio');
@@ -222,7 +218,7 @@ async function handleLoad(config) {
 }
 
 async function handleAudio({ samples }) {
-    if (!engine || !tokenizer) return;
+    if (!engine) return;
 
     const audioData = samples instanceof Float32Array
         ? samples
@@ -236,16 +232,12 @@ async function handleAudio({ samples }) {
     totalSamples += audioData.length;
     audioChunkCount++;
 
-    // Process chunk immediately (streaming encode)
-    const tokenIds = await engine.feedAudio(audioData);
-    const ids = tokenIds ? Array.from(tokenIds) : [];
+    // Process chunk immediately (streaming encode → text)
+    const text = await engine.feedAudio(audioData);
 
-    if (ids.length > 0) {
-        tokenCount += ids.length;
-        const text = tokenizer.decode(ids);
-        if (text) {
-            self.postMessage({ type: 'transcript', text, final: false });
-        }
+    if (text) {
+        tokenCount++;
+        self.postMessage({ type: 'transcript', text, final: false });
     }
 
     const now = performance.now();
@@ -272,7 +264,7 @@ async function handleAudio({ samples }) {
 }
 
 async function handleStop() {
-    if (!engine || !tokenizer) return;
+    if (!engine) return;
 
     if (totalSamples === 0) {
         logState('Stop: no audio received');
@@ -282,20 +274,14 @@ async function handleStop() {
 
     logState(`Flushing (${totalSamples} samples = ${(totalSamples/24000).toFixed(1)}s, ${tokenCount} tokens so far)...`);
 
-    // Flush remaining delayed tokens
-    const flushIds = await engine.flush();
-    const fids = flushIds ? Array.from(flushIds) : [];
+    // Flush remaining delayed tokens (returns decoded text)
+    const flushText = await engine.flush();
 
-    if (fids.length > 0) {
-        logState(`Flush produced ${fids.length} tokens: [${fids.join(',')}]`);
-        const text = tokenizer.decode(fids);
-        if (text) {
-            self.postMessage({ type: 'transcript', text, final: false });
-        } else {
-            logState('Flush tokens decoded to empty string (all special?)');
-        }
+    if (flushText) {
+        logState(`Flush produced text: "${flushText}"`);
+        self.postMessage({ type: 'transcript', text: flushText, final: false });
     } else {
-        logState('Flush returned 0 tokens');
+        logState('Flush returned empty text');
     }
 
     // Calculate final RTF and send Rust-side metrics
