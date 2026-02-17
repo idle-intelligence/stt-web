@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""Evaluate WER for original vs Q4 quantized Kyutai STT model.
+"""Evaluate WER for original vs Q4 quantized STT model.
+
+STUB — not yet fully implemented. Both inference paths currently return
+placeholder strings; WER numbers reported by this script are not meaningful.
+This file is a scaffold to be completed once the Rust GGUF inference path
+is available.
 
 Usage:
     python scripts/eval.py [--gguf PATH] [--dataset DATASET] [--split SPLIT]
 
-Runs inference on LibriSpeech test-clean with both the original f32
-and Q4 quantized model, computes Word Error Rate (WER), and reports
-the delta. Target: within 2% absolute degradation.
-
-Note: This script requires the `moshi` package to be installed:
-    pip install moshi
-
-The script will:
+When complete, this will:
 1. Load the original PyTorch model from HuggingFace
-2. Load the Q4 GGUF model (when Rust GGUF loader is ready)
+2. Load the Q4 GGUF model via the Rust CLI
 3. Run inference on a subset of LibriSpeech test-clean
-4. Compute WER for both and report delta
+4. Compute WER for both and report delta (target: ≤2% absolute)
+
+Note: Requires the `moshi` package:
+    pip install moshi
 """
 
 import argparse

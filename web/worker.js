@@ -90,7 +90,7 @@ self.onmessage = (e) => {
 // Cache helpers
 // ---------------------------------------------------------------------------
 
-const CACHE_NAME = 'kyutai-stt-model-v1';
+const CACHE_NAME = 'stt-model-v1';
 
 /**
  * Fetch a URL with caching via the Cache API.
@@ -162,11 +162,10 @@ async function cachedFetch(url, label) {
 async function handleLoad(config) {
     const base = (config.baseUrl || '').replace(/\/+$/, '');
 
-    // 1. Import WASM module (cache-bust during dev).
+    // 1. Import WASM module.
     self.postMessage({ type: 'status', text: 'Loading WASM module...' });
-    const cacheBust = '?v=' + Date.now();
-    sttWasm = await import(base + '/pkg/stt_wasm.js' + cacheBust);
-    await sttWasm.default(base + '/pkg/stt_wasm_bg.wasm' + cacheBust);
+    sttWasm = await import(base + '/pkg/stt_wasm.js');
+    await sttWasm.default(base + '/pkg/stt_wasm_bg.wasm');
 
     // 2. Initialize WebGPU device.
     self.postMessage({ type: 'status', text: 'Initializing WebGPU device...' });
@@ -217,16 +216,7 @@ async function handleLoad(config) {
     tokenizer = new SpmDecoder();
     await tokenizer.load(tokenizerUrl);
 
-    // 8. Run diagnostic forward pass to compare with native Metal output.
-    self.postMessage({ type: 'status', text: 'Running diagnostics...' });
-    try {
-        const diagResult = await engine.diagnose();
-        console.log('[worker] DIAGNOSE OUTPUT:\n' + diagResult);
-    } catch (diagErr) {
-        console.warn('[worker] Diagnose failed:', diagErr);
-    }
-
-    // 9. Signal ready.
+    // 8. Signal ready.
     logState('Model loaded, ready to receive audio');
     self.postMessage({ type: 'status', text: 'Ready', ready: true });
 }
@@ -253,10 +243,6 @@ async function handleAudio({ samples }) {
     if (ids.length > 0) {
         tokenCount += ids.length;
         const text = tokenizer.decode(ids);
-        // Log first few tokens and any non-empty text for debugging
-        if (tokenCount <= 15 || text) {
-            logState(`Tokens [${ids.join(',')}] → "${text}" (chunk #${audioChunkCount}, total tokens: ${tokenCount})`);
-        }
         if (text) {
             self.postMessage({ type: 'transcript', text, final: false });
         }

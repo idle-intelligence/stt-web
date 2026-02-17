@@ -46,27 +46,12 @@ impl SttStream {
         if self.frame_count <= self.config.text_delay {
             let logits = model.forward(audio_tokens, self.last_text_token, &mut self.cache);
             let _ = self.extract_token(logits).await; // updates last_text_token
-            // Log warmup tokens for first few frames
-            if self.frame_count <= 3 {
-                Self::log(&format!(
-                    "[stt] warmup frame {}/{}: predicted token={}",
-                    self.frame_count, self.config.text_delay, self.last_text_token
-                ));
-            }
             return None;
         }
 
         // Normal forward path
         let logits = model.forward(audio_tokens, self.last_text_token, &mut self.cache);
-        let result = self.extract_token(logits).await;
-        // Log first few post-warmup tokens
-        if self.frame_count <= self.config.text_delay + 5 {
-            Self::log(&format!(
-                "[stt] frame {}: token={} (text_delay={})",
-                self.frame_count, self.last_text_token, self.config.text_delay
-            ));
-        }
-        result
+        self.extract_token(logits).await
     }
 
     /// Extract token from logits via argmax + async readback.

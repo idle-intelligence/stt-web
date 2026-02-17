@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kyutai STT — Browser Speech-to-Text</title>
+    <title>STT — Browser Speech-to-Text</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -188,7 +188,7 @@
     </style>
 </head>
 <body>
-    <h1>Kyutai STT 1B</h1>
+    <h1>Speech-to-Text</h1>
     <p class="subtitle">Client-side speech-to-text (English + French) — runs entirely in your browser via WebGPU.</p>
 
     <div class="card">
@@ -256,7 +256,7 @@
     </div>
 
     <script type="module">
-        const { SttClient } = await import('./stt-client.js?v=' + Date.now());
+        const { SttClient } = await import('./stt-client.js');
 
         // UI elements
         const statusDot = document.getElementById('statusDot');
@@ -289,7 +289,7 @@
                 metricFps.textContent = data.framesPerSec.toFixed(1);
             }
             if (data.rtf != null) {
-                metricRtf.textContent = (typeof data.rtf === 'object' ? data.rtf.total : data.rtf).toFixed(2);
+                metricRtf.textContent = data.rtf.toFixed(2);
             }
             if (data.avgFrameMs != null) {
                 metricFrameMs.textContent = data.avgFrameMs.toFixed(1);
@@ -457,9 +457,9 @@
                 const rendered = await resampleCtx.startRendering();
                 const pcm = rendered.getChannelData(0);
 
-                console.log(`[file] Decoded: ${pcm.length} samples (${(pcm.length/24000).toFixed(1)}s) at 24kHz`);
-
                 // Reset state before feeding
+                // Note: posting directly to client.worker to use transferable buffers
+                // for zero-copy audio transfer, bypassing SttClient's wrapper.
                 client.worker.postMessage({ type: 'reset' });
                 transcriptText = '';
                 transcriptTextEl.textContent = '';

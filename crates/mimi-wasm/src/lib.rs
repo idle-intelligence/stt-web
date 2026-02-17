@@ -113,8 +113,6 @@ impl MimiCodec {
         // Parse safetensors
         let tensors = weights::load_safetensors(&weights_data)?;
 
-        // Build encoder (placeholder - needs actual weight loading)
-        // For now, create empty/stub components
         let encoder = Self::build_encoder(&tensors, &config)?;
         let encoder_transformer = Self::build_transformer(&tensors, &config)?;
         let downsample = Self::build_downsample(&tensors, &config)?;

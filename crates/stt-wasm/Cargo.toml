@@ -3,7 +3,7 @@ name = "stt-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Kyutai STT 1B transformer in Burn+wgpu — runs natively and in browser via WASM+WebGPU"
+description = "STT 1B transformer in Burn+wgpu — runs natively and in browser via WASM+WebGPU"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -67,11 +67,6 @@ web-sys = { workspace = true, optional = true }
 console_error_panic_hook = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }
-
-[[bin]]
-name = "stt-transcribe"
-path = "src/bin/transcribe.rs"
-required-features = ["cli"]
 
 [dev-dependencies]
 approx = "0.5"

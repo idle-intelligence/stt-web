@@ -1,6 +1,6 @@
 //! 1D convolution operations for audio processing.
 //!
-//! Implements Conv1d and ConvTranspose1d with streaming support.
+//! Implements Conv1d with streaming support.
 
 use crate::tensor::Tensor3;
 use ndarray::{Array1, Array2, Array3};
@@ -80,21 +80,6 @@ impl Conv1d {
             buffer: Vec::new(),
             left_pad_applied: false,
         }
-    }
-
-    /// Get output channels.
-    pub fn out_channels(&self) -> usize {
-        self.out_channels
-    }
-
-    /// Get input channels.
-    pub fn in_channels(&self) -> usize {
-        self.in_channels
-    }
-
-    /// Get kernel size.
-    pub fn kernel_size(&self) -> usize {
-        self.kernel_size
     }
 
     /// Calculate padding for causal convolution.
@@ -616,99 +601,6 @@ impl Conv1d {
     }
 }
 
-/// 1D transposed convolution (upsampling).
-#[derive(Clone, Debug)]
-pub struct ConvTranspose1d {
-    /// Weight tensor: (in_channels, out_channels, kernel_size)
-    pub weight: Array3<f32>,
-    /// Bias vector: (out_channels,)
-    pub bias: Option<Array1<f32>>,
-    pub stride: usize,
-    pub causal: bool,
-    buffer: Vec<Array2<f32>>,
-}
-
-impl ConvTranspose1d {
-    pub fn new(
-        weight: Array3<f32>,
-        bias: Option<Array1<f32>>,
-        stride: usize,
-        causal: bool,
-    ) -> Self {
-        Self {
-            weight,
-            bias,
-            stride,
-            causal,
-            buffer: Vec::new(),
-        }
-    }
-
-    pub fn in_channels(&self) -> usize {
-        self.weight.shape()[0]
-    }
-
-    pub fn out_channels(&self) -> usize {
-        self.weight.shape()[1]
-    }
-
-    pub fn kernel_size(&self) -> usize {
-        self.weight.shape()[2]
-    }
-
-    /// Forward pass (transposed convolution).
-    pub fn forward(&self, input: &Tensor3) -> Tensor3 {
-        let (batch, in_c, time_in) = input.shape();
-        assert_eq!(in_c, self.in_channels(), "Input channels mismatch");
-
-        let time_out = time_in * self.stride;
-        let mut output = Array3::<f32>::zeros((batch, self.out_channels(), time_out));
-
-        // Simplified transposed convolution
-        for b in 0..batch {
-            for in_c in 0..in_c {
-                for t_in in 0..time_in {
-                    let input_val = input.data[[b, in_c, t_in]];
-                    for k in 0..self.kernel_size() {
-                        let t_out = t_in * self.stride + k;
-                        if t_out < time_out {
-                            for out_c in 0..self.out_channels() {
-                                let weight_val = self.weight[[in_c, out_c, k]];
-                                output[[b, out_c, t_out]] += input_val * weight_val;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Add bias
-        if let Some(ref bias) = self.bias {
-            for b in 0..batch {
-                for c in 0..self.out_channels() {
-                    for t in 0..time_out {
-                        output[[b, c, t]] += bias[c];
-                    }
-                }
-            }
-        }
-
-        Tensor3::new(output)
-    }
-
-    pub fn init_buffer(&mut self, batch_size: usize) {
-        self.buffer = (0..batch_size)
-            .map(|_| Array2::zeros((self.in_channels(), 0)))
-            .collect();
-    }
-
-    pub fn reset(&mut self) {
-        for buf in &mut self.buffer {
-            buf.fill(0.0);
-        }
-    }
-}
-
 /// Downsampling convolution (used between encoder and quantizer).
 #[derive(Clone, Debug)]
 pub struct ConvDownsample {
@@ -738,19 +630,3 @@ impl ConvDownsample {
     }
 }
 
-/// Upsampling transposed convolution (used after dequantizer).
-#[derive(Clone, Debug)]
-pub struct ConvUpsample {
-    conv: ConvTranspose1d,
-}
-
-impl ConvUpsample {
-    pub fn new(weight: Array3<f32>, bias: Option<Array1<f32>>, stride: usize) -> Self {
-        let conv = ConvTranspose1d::new(weight, bias, stride, true);
-        Self { conv }
-    }
-
-    pub fn forward(&self, input: &Tensor3) -> Tensor3 {
-        self.conv.forward(input)
-    }
-}

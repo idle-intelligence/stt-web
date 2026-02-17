@@ -24,8 +24,8 @@ cargo test --features "wgpu"
 cargo clippy --features "wgpu,cli" -- -D warnings
 cargo clippy --no-default-features --features wasm --target wasm32-unknown-unknown -- -D warnings
 
-# E2E browser test
-bunx playwright test tests/e2e_browser.spec.ts
+# Rust integration tests (under crates/stt-wasm/tests/ and crates/mimi-wasm/tests/)
+cargo test --features "wgpu" -- --test-threads=1
 
 # Quantization and evaluation (Python)
 python scripts/quantize.py   # safetensors → Q4 GGUF
@@ -51,7 +51,7 @@ crates/
 web/
   index.html          # standalone demo page (no bundler)
   worker.js           # Web Worker: loads WASM, orchestrates pipeline
-  audio-processor.js  # AudioWorklet: mic → 16kHz mono PCM chunks
+  audio-processor.js  # AudioWorklet: mic → 24kHz mono PCM chunks
   stt-client.js       # optional JS embedding API
 scripts/              # quantize.py, eval.py, gen-cert.sh
 tests/reference/      # shared test fixtures (wav, tokens, transcripts)
@@ -80,7 +80,7 @@ tests/reference/      # shared test fixtures (wav, tokens, transcripts)
 - `cubecl = "0.9"` (with vendored patch for workgroup limits)
 - `wasm-bindgen = "0.2"`, `js-sys`, `web-sys` (WASM target)
 - `wgpu = "26"` (direct device init in WASM)
-- `hound = "3.5"` (WAV I/O), `rubato = "1.0"` (resampling)
+- `hound = "3.5"` (WAV I/O)
 - `tokenizers = "0.22"` (native-only, has C deps)
 
 ## Feature Flags
@@ -99,7 +99,7 @@ hub = ["hf-hub"]
 ## Architecture: Inference Pipeline
 
 ```
-Microphone → AudioWorklet (16kHz mono PCM)
+Microphone → AudioWorklet (24kHz mono PCM)
   → Web Worker
     → Mimi codec [WASM, CPU] (PCM → 32 codebook tokens per frame at 12.5Hz)
       → STT Transformer [WASM+WebGPU] (audio tokens + prev text token → next text token)
@@ -124,23 +124,3 @@ Worker → Main: { type: 'status' | 'transcript' | 'error', ... }
 - Page load to transcribing < 10s (after model cached)
 - Chrome and Edge required; Firefox best-effort
 
-## Agent Assignments
-
-This project is built by a team of parallel Claude Code sessions. Each agent has a detailed brief in `agents/AGENT-N-*.md`. Start a new Claude Code session and tell it: **"Read `agents/AGENT-N-*.md` and execute it."**
-
-Dependency graph:
-
-```
-Agent 1 (Q4 weights) ─────────────────┐
-                                       ├─→ Agent 3 (STT transformer in Burn) ─→ Agent 5 (integration)
-Agent 2 (Mimi codec → WASM) ──────────┤                                          ↑
-                                       └─→ Agent 4 (browser UI) ─────────────────┘
-```
-
-| Agent | Brief | Scope | Can start |
-|-------|-------|-------|-----------|
-| 1 (Weights) | `agents/AGENT-1-WEIGHTS.md` | `scripts/quantize.py`, `scripts/eval.py` | Immediately |
-| 2 (Mimi) | `agents/AGENT-2-MIMI.md` | `crates/mimi-wasm/` | Immediately |
-| 3 (Model) | `agents/AGENT-3-MODEL.md` | `crates/stt-wasm/` | Immediately (needs Agent 1 weights for testing) |
-| 4 (Web) | `agents/AGENT-4-WEB.md` | `web/` | Immediately (needs Agent 2+3 WASM for integration) |
-| 5 (Integration) | `agents/AGENT-5-INTEGRATION.md` | `tests/`, `README.md` | After 1-4 deliver |

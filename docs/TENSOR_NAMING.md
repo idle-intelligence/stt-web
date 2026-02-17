@@ -1,4 +1,4 @@
-# GGUF Tensor Naming Convention for Kyutai STT
+# GGUF Tensor Naming Convention for STT
 
 This document describes the tensor naming scheme used in the Q4 GGUF quantized weights for the `kyutai/stt-1b-en_fr` model.
 

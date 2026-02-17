@@ -1,6 +1,6 @@
-# kyutai-stt-browser
+# stt-web
 
-Browser-native speech-to-text using Kyutai's STT 1B model, running 100% client-side via Rust/WASM + WebGPU.
+Browser-native speech-to-text running 100% client-side via Rust/WASM + WebGPU.
 
 > **Disclaimer:** This is an experimental port. The model weights are Q4-quantized from [kyutai/stt-1b-en_fr](https://huggingface.co/kyutai/stt-1b-en_fr) (CC-BY 4.0). Transcription quality may differ from the original PyTorch implementation. This project is not affiliated with or endorsed by Kyutai Labs.
 
