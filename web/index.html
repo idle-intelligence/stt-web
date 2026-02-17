@@ -457,8 +457,6 @@
                 const rendered = await resampleCtx.startRendering();
                 const pcm = rendered.getChannelData(0);
 
-                console.log(`[file] Decoded: ${pcm.length} samples (${(pcm.length/24000).toFixed(1)}s) at 24kHz`);
-
                 // Reset state before feeding
                 client.worker.postMessage({ type: 'reset' });
                 transcriptText = '';

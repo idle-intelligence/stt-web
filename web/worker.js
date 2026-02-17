@@ -216,16 +216,7 @@ async function handleLoad(config) {
     tokenizer = new SpmDecoder();
     await tokenizer.load(tokenizerUrl);
 
-    // 8. Run diagnostic forward pass to compare with native Metal output.
-    self.postMessage({ type: 'status', text: 'Running diagnostics...' });
-    try {
-        const diagResult = await engine.diagnose();
-        console.log('[worker] DIAGNOSE OUTPUT:\n' + diagResult);
-    } catch (diagErr) {
-        console.warn('[worker] Diagnose failed:', diagErr);
-    }
-
-    // 9. Signal ready.
+    // 8. Signal ready.
     logState('Model loaded, ready to receive audio');
     self.postMessage({ type: 'status', text: 'Ready', ready: true });
 }
@@ -252,10 +243,6 @@ async function handleAudio({ samples }) {
     if (ids.length > 0) {
         tokenCount += ids.length;
         const text = tokenizer.decode(ids);
-        // Log first few tokens and any non-empty text for debugging
-        if (tokenCount <= 15 || text) {
-            logState(`Tokens [${ids.join(',')}] → "${text}" (chunk #${audioChunkCount}, total tokens: ${tokenCount})`);
-        }
         if (text) {
             self.postMessage({ type: 'transcript', text, final: false });
         }
