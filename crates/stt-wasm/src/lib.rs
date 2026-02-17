@@ -1,7 +1,7 @@
-//! Kyutai STT 1B — browser-native speech-to-text.
+//! STT 1B — browser-native speech-to-text.
 //!
 //! Decoder-only transformer consuming Mimi audio codec tokens (32 codebooks at 12.5Hz)
-//! and producing text tokens on a delayed parallel stream (6 frames / 480ms offset).
+//! and producing text tokens on a delayed parallel stream (7 frames / 560ms offset).
 //!
 //! Uses Burn's wgpu backend for GPU inference — works natively (Vulkan/Metal) and
 //! in the browser (WASM + WebGPU).

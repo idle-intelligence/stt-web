@@ -3,7 +3,7 @@ name = "stt-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Kyutai STT 1B transformer in Burn+wgpu — runs natively and in browser via WASM+WebGPU"
+description = "STT 1B transformer in Burn+wgpu — runs natively and in browser via WASM+WebGPU"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

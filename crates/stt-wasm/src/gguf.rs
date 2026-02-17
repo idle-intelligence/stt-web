@@ -19,7 +19,7 @@ use burn::tensor::{DType, Tensor, TensorData, TensorPrimitive};
 use byteorder::{LittleEndian, ReadBytesExt};
 use cubecl::prelude::KernelId;
 use cubecl::server::{Bindings, CubeCount, Handle};
-use cubecl::{client::ComputeClient, CubeTask, Runtime};
+use cubecl::{CubeTask, Runtime};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -408,10 +408,6 @@ pub struct Q4Tensor {
     pub(crate) handle: Handle,
     shape: [usize; 2],
     num_blocks: usize,
-    #[allow(dead_code)]
-    client: ComputeClient<WgpuRuntime>,
-    #[allow(dead_code)]
-    device: WgpuDevice,
 }
 
 impl Q4Tensor {
@@ -451,8 +447,6 @@ impl Q4Tensor {
             handle,
             shape,
             num_blocks,
-            client,
-            device: device.clone(),
         })
     }
 

@@ -1,4 +1,4 @@
-//! WASM bindings for Kyutai STT using Q4 GGUF weights and wgpu (WebGPU) backend.
+//! WASM bindings for STT using Q4 GGUF weights and wgpu (WebGPU) backend.
 //!
 //! Provides JavaScript-callable APIs for GPU-accelerated Q4 inference
 //! in browsers with WebGPU support.
