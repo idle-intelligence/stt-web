@@ -209,21 +209,6 @@ impl LayerCaches {
 // Masking
 // ---------------------------------------------------------------------------
 
-/// Apply causal mask to attention scores (same-length Q and K).
-fn apply_causal_mask(scores: Tensor<Wgpu, 4>, seq_len: usize) -> Tensor<Wgpu, 4> {
-    let device = scores.device();
-    let mut mask_data = vec![0.0f32; seq_len * seq_len];
-    for i in 0..seq_len {
-        for j in (i + 1)..seq_len {
-            mask_data[i * seq_len + j] = f32::NEG_INFINITY;
-        }
-    }
-    let mask: Tensor<Wgpu, 1> = Tensor::from_floats(mask_data.as_slice(), &device);
-    let mask: Tensor<Wgpu, 2> = mask.reshape([seq_len, seq_len]);
-    let mask: Tensor<Wgpu, 4> = mask.unsqueeze_dim::<3>(0).unsqueeze_dim(0);
-    scores + mask
-}
-
 /// Apply causal mask with different Q/K lengths (for KV cache).
 fn apply_causal_mask_with_offset(
     scores: Tensor<Wgpu, 4>,
@@ -392,48 +377,6 @@ impl Q4Attention {
         self.out_proj.forward(out)
     }
 
-    /// Forward pass without KV cache (for prefill).
-    pub fn forward(
-        &self,
-        x: Tensor<Wgpu, 3>,
-        rope: &RoPE,
-        offset: usize,
-    ) -> Tensor<Wgpu, 3> {
-        let [batch, seq_len, _] = x.dims();
-
-        let qkv = self.in_proj.forward(x);
-        let (q, k, v) = self.split_qkv(qkv);
-
-        let q = q.reshape([batch, seq_len, self.n_heads, self.head_dim]);
-        let k = k.reshape([batch, seq_len, self.n_kv_heads, self.head_dim]);
-        let v = v.reshape([batch, seq_len, self.n_kv_heads, self.head_dim]);
-
-        let (q, k) = rope.apply(q, k, offset);
-
-        let q = q.swap_dims(1, 2);
-        let k = k.swap_dims(1, 2);
-        let v = v.swap_dims(1, 2);
-
-        let (k, v) = self.expand_kv(k, v);
-
-        let k_t = k.swap_dims(2, 3);
-        let scores = q.matmul(k_t) * self.scale;
-
-        let scores = apply_causal_mask(scores, seq_len);
-        let scores = if let Some(window) = self.sliding_window {
-            apply_sliding_window_mask_with_offset(scores, seq_len, seq_len, window, offset)
-        } else {
-            scores
-        };
-
-        let attn = softmax(scores, 3);
-        let out = attn.matmul(v);
-
-        let out = out.swap_dims(1, 2);
-        let out = out.reshape([batch, seq_len, self.n_heads * self.head_dim]);
-        self.out_proj.forward(out)
-    }
-
     fn expand_kv(
         &self,
         k: Tensor<Wgpu, 4>,
@@ -531,22 +474,6 @@ impl Q4TransformerBlock {
         x + residual
     }
 
-    pub fn forward(
-        &self,
-        x: Tensor<Wgpu, 3>,
-        rope: &RoPE,
-        offset: usize,
-    ) -> Tensor<Wgpu, 3> {
-        let residual = x.clone();
-        let x = self.attention_norm.forward(x);
-        let x = self.attention.forward(x, rope, offset);
-        let x = x + residual;
-
-        let residual = x.clone();
-        let x = self.ffn_norm.forward(x);
-        let x = self.ffn.forward(x);
-        x + residual
-    }
 }
 
 // ---------------------------------------------------------------------------

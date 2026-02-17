@@ -6,7 +6,32 @@
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use burn::tensor::{Tensor, TensorData};
 
-use stt_wasm::gguf::{dequantize_q4_0_cpu, Q4Tensor, q4_matmul};
+use stt_wasm::gguf::{Q4Tensor, q4_matmul};
+
+/// CPU reference dequantization for test verification.
+fn dequantize_q4_0_cpu(raw: &[u8], num_elements: usize) -> Vec<f32> {
+    let num_blocks = num_elements / 32;
+    let mut output = vec![0.0f32; num_elements];
+    for block_idx in 0..num_blocks {
+        let offset = block_idx * 18;
+        let bits = u16::from_le_bytes([raw[offset], raw[offset + 1]]);
+        // f16 to f32
+        let d = {
+            let sign = ((bits >> 15) & 1) as u32;
+            let exp = ((bits >> 10) & 0x1F) as u32;
+            let mant = (bits & 0x3FF) as u32;
+            let f32_exp = (exp as i32 - 15 + 127) as u32;
+            f32::from_bits((sign << 31) | (f32_exp << 23) | (mant << 13))
+        };
+        let base = block_idx * 32;
+        for i in 0..16 {
+            let byte = raw[offset + 2 + i];
+            output[base + i] = ((byte & 0x0F) as f32 - 8.0) * d;
+            output[base + i + 16] = (((byte >> 4) & 0x0F) as f32 - 8.0) * d;
+        }
+    }
+    output
+}
 
 fn device() -> WgpuDevice {
     WgpuDevice::default()
@@ -396,8 +421,8 @@ fn test_q4_matmul_with_actual_gguf() {
     let test_tokens: Vec<u32> = vec![0, 1, 100, 326, 955, 2048];
     let mut embs = Vec::new();
     for &tok in &test_tokens {
-        let emb = emb0.embed_id(tok, &device);
-        let data: Vec<f32> = emb.into_data().to_vec::<f32>().unwrap();
+        let mut data = vec![0.0f32; emb0_shape[1]];
+        emb0.embed_id_add_cpu(tok, &mut data);
         let norm: f32 = data.iter().map(|v| v * v).sum::<f32>().sqrt();
         println!("  token {tok}: norm={norm:.4} first4={:?}", &data[..4]);
         embs.push(data);
@@ -438,8 +463,14 @@ fn test_q4_matmul_with_actual_gguf() {
     let q4 = Q4Tensor::from_q4_bytes(&in_proj_bytes, [in_proj_shape[0], in_proj_shape[1]], &device).unwrap();
 
     // Create two different embedding sums
-    let emb_326 = emb0.embed_id(326, &device);
-    let emb_955 = emb0.embed_id(955, &device);
+    let dim = emb0_shape[1];
+    let mut emb_326_data = vec![0.0f32; dim];
+    emb0.embed_id_add_cpu(326, &mut emb_326_data);
+    let mut emb_955_data = vec![0.0f32; dim];
+    emb0.embed_id_add_cpu(955, &mut emb_955_data);
+
+    let emb_326 = Tensor::<Wgpu, 2>::from_data(TensorData::new(emb_326_data, [1, dim]), &device);
+    let emb_955 = Tensor::<Wgpu, 2>::from_data(TensorData::new(emb_955_data, [1, dim]), &device);
 
     let input1 = emb_326.unsqueeze_dim::<3>(0); // [1, 1, 2048]
     let input2 = emb_955.unsqueeze_dim::<3>(0); // [1, 1, 2048]

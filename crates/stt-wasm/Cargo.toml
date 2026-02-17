@@ -68,11 +68,6 @@ console_error_panic_hook = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 wgpu = { workspace = true, optional = true }
 
-[[bin]]
-name = "stt-transcribe"
-path = "src/bin/transcribe.rs"
-required-features = ["cli"]
-
 [dev-dependencies]
 approx = "0.5"
 pollster = "0.4"

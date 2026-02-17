@@ -84,25 +84,6 @@ fn reverse_gguf_dims(gguf_dims: &[u64]) -> Vec<usize> {
     gguf_dims.iter().rev().map(|&d| d as usize).collect()
 }
 
-/// Dequantize Q4_0 blocks on CPU, returning `num_elements` f32 values.
-pub fn dequantize_q4_0_cpu(raw: &[u8], num_elements: usize) -> Vec<f32> {
-    let num_blocks = num_elements / 32;
-    let mut output = vec![0.0f32; num_elements];
-    for block_idx in 0..num_blocks {
-        let offset = block_idx * 18;
-        let d = f16_to_f32(u16::from_le_bytes([raw[offset], raw[offset + 1]]));
-        let base = block_idx * 32;
-        for i in 0..16 {
-            let byte = raw[offset + 2 + i];
-            let lo = (byte & 0x0F) as f32 - 8.0;
-            let hi = ((byte >> 4) & 0x0F) as f32 - 8.0;
-            output[base + i] = lo * d;
-            output[base + i + 16] = hi * d;
-        }
-    }
-    output
-}
-
 // ---------------------------------------------------------------------------
 // GGUF String / Value helpers
 // ---------------------------------------------------------------------------
@@ -311,10 +292,6 @@ impl<R: Read + Seek> GgufReader<R> {
 
     pub fn tensor_info(&self, name: &str) -> Option<&GgufTensorInfo> {
         self.tensors.get(name)
-    }
-
-    pub fn tensor_names(&self) -> Vec<&str> {
-        self.tensors.keys().map(|s| s.as_str()).collect()
     }
 
     /// Read raw tensor data bytes from the file.
@@ -638,37 +615,6 @@ impl EmbeddingStore {
         self.dim
     }
 
-    /// Look up a single token embedding, returning [1, dim].
-    pub fn embed_id(&self, id: u32, device: &WgpuDevice) -> Tensor<Wgpu, 2> {
-        self.embed_ids(&[id], device)
-    }
-
-    /// Look up multiple token embeddings, returning [len, dim].
-    pub fn embed_ids(&self, ids: &[u32], device: &WgpuDevice) -> Tensor<Wgpu, 2> {
-        let blocks_per_row = self.dim / 32;
-        let bytes_per_row = blocks_per_row * 18;
-        let mut output = vec![0.0f32; ids.len() * self.dim];
-
-        for (i, &id) in ids.iter().enumerate() {
-            let row_offset = (id as usize) * bytes_per_row;
-            let row_bytes = &self.cpu_bytes[row_offset..row_offset + bytes_per_row];
-            let out_slice = &mut output[i * self.dim..(i + 1) * self.dim];
-
-            for block in 0..blocks_per_row {
-                let bo = block * 18;
-                let d = f16_to_f32(u16::from_le_bytes([row_bytes[bo], row_bytes[bo + 1]]));
-                let base = block * 32;
-                for j in 0..16 {
-                    let byte = row_bytes[bo + 2 + j];
-                    out_slice[base + j] = ((byte & 0x0F) as f32 - 8.0) * d;
-                    out_slice[base + j + 16] = (((byte >> 4) & 0x0F) as f32 - 8.0) * d;
-                }
-            }
-        }
-
-        Tensor::from_data(TensorData::new(output, [ids.len(), self.dim]), device)
-    }
-
     /// Dequantize a single row into an existing CPU buffer (for accumulation).
     ///
     /// Adds the dequantized embedding to `out_buf` (which must be `dim` f32s).
@@ -886,39 +832,6 @@ impl<R: Read + Seek> Q4ModelLoader<R> {
         let bytes = self.reader.tensor_data(name)?;
         let q4 = Q4Tensor::from_q4_bytes(&bytes, [shape[0], shape[1]], device)?;
         Ok(Q4Linear::new(q4, None))
-    }
-
-    fn load_f32_tensor<const D: usize>(
-        &mut self,
-        name: &str,
-        device: &WgpuDevice,
-    ) -> Result<Tensor<Wgpu, D>> {
-        let info = self
-            .reader
-            .tensor_info(name)
-            .with_context(|| format!("Tensor '{name}' not found"))?
-            .clone();
-
-        let shape: Vec<usize> = reverse_gguf_dims(info.shape());
-        let bytes = self.reader.tensor_data(name)?;
-
-        let data: Vec<f32> = match info.dtype() {
-            GgmlDtype::F32 => bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect(),
-            GgmlDtype::F16 => bytes
-                .chunks_exact(2)
-                .map(|b| {
-                    let bits = u16::from_le_bytes([b[0], b[1]]);
-                    f16_to_f32(bits)
-                })
-                .collect(),
-            GgmlDtype::Q4_0 => bail!("Cannot load Q4_0 tensor '{name}' as f32"),
-        };
-
-        let tensor_data = TensorData::new(data, shape);
-        Ok(Tensor::from_data(tensor_data, device))
     }
 
     fn load_rms_norm(

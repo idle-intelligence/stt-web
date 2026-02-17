@@ -2,7 +2,7 @@
 //!
 //! Based on ndarray with shape (batch, channels, time) for 3D tensors.
 
-use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayView3, Axis};
+use ndarray::{Array1, Array3, ArrayView3, Axis};
 use std::ops::{Add, Mul};
 
 /// 3D tensor with shape (batch, channels, time).
@@ -138,51 +138,6 @@ impl Tensor3 {
         Self { data: out }
     }
 
-    /// Apply GELU activation element-wise.
-    pub fn gelu(&self) -> Self {
-        let data = self.data.mapv(|x| {
-            // GELU(x) = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-            let c = (2.0_f32 / std::f32::consts::PI).sqrt();
-            x * 0.5 * (1.0 + (c * (x + 0.044715 * x * x * x)).tanh())
-        });
-        Self { data }
-    }
-
-    /// Softmax over the last dimension (axis 2), using raw slices for speed.
-    pub fn softmax_last(&self) -> Self {
-        let (batch, d1, d2) = self.shape();
-        let mut out = self.data.clone();
-        let slice = out.as_slice_mut().unwrap();
-        for b in 0..batch {
-            let b_off = b * d1 * d2;
-            for i in 0..d1 {
-                let row_off = b_off + i * d2;
-                let row = &mut slice[row_off..row_off + d2];
-                // Find max for numerical stability
-                let mut max_val = f32::NEG_INFINITY;
-                for &v in row.iter() {
-                    if v > max_val {
-                        max_val = v;
-                    }
-                }
-                // Exp and sum
-                let mut sum = 0.0f32;
-                for v in row.iter_mut() {
-                    *v = (*v - max_val).exp();
-                    sum += *v;
-                }
-                // Normalize
-                if sum > 0.0 {
-                    let inv_sum = 1.0 / sum;
-                    for v in row.iter_mut() {
-                        *v *= inv_sum;
-                    }
-                }
-            }
-        }
-        Self { data: out }
-    }
-
     /// Batched matrix multiply: (batch, M, K) @ (batch, K, N) → (batch, M, N)
     pub fn matmul(&self, other: &Self) -> Self {
         let (b1, m, k1) = self.shape();
@@ -230,46 +185,3 @@ impl Mul<f32> for &Tensor3 {
     }
 }
 
-/// 2D tensor with shape (channels, time).
-#[derive(Clone, Debug)]
-pub struct Tensor2 {
-    pub data: Array2<f32>,
-}
-
-impl Tensor2 {
-    pub fn new(data: Array2<f32>) -> Self {
-        Self { data }
-    }
-
-    pub fn zeros(shape: (usize, usize)) -> Self {
-        Self {
-            data: Array2::zeros(shape),
-        }
-    }
-
-    pub fn view(&self) -> ArrayView2<f32> {
-        self.data.view()
-    }
-}
-
-/// 1D tensor (vector).
-#[derive(Clone, Debug)]
-pub struct Tensor1 {
-    pub data: Array1<f32>,
-}
-
-impl Tensor1 {
-    pub fn new(data: Array1<f32>) -> Self {
-        Self { data }
-    }
-
-    pub fn zeros(len: usize) -> Self {
-        Self {
-            data: Array1::zeros(len),
-        }
-    }
-
-    pub fn view(&self) -> ArrayView1<f32> {
-        self.data.view()
-    }
-}
