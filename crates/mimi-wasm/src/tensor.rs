@@ -52,8 +52,24 @@ impl Tensor3 {
 
     /// Apply activation function element-wise.
     pub fn elu(&self, alpha: f32) -> Self {
-        let data = self.data.mapv(|x| if x > 0.0 { x } else { alpha * (x.exp() - 1.0) });
+        let mut data = self.data.clone();
+        let slice = data.as_slice_mut().unwrap();
+        for v in slice.iter_mut() {
+            if *v <= 0.0 {
+                *v = alpha * (v.exp() - 1.0);
+            }
+        }
         Self { data }
+    }
+
+    /// Apply ELU activation in-place, avoiding allocation.
+    pub fn elu_inplace(&mut self, alpha: f32) {
+        let slice = self.data.as_slice_mut().unwrap();
+        for v in slice.iter_mut() {
+            if *v <= 0.0 {
+                *v = alpha * (v.exp() - 1.0);
+            }
+        }
     }
 
     /// Slice along the time dimension.
@@ -91,8 +107,20 @@ impl Tensor3 {
 
     /// Transpose axes 1 and 2: (batch, channels, time) → (batch, time, channels)
     pub fn transpose_12(&self) -> Self {
-        let permuted = self.data.clone().permuted_axes([0, 2, 1]);
-        Self { data: permuted.as_standard_layout().to_owned() }
+        let (batch, d1, d2) = self.shape();
+        let mut out = Array3::<f32>::zeros((batch, d2, d1));
+        let src = self.data.as_slice().unwrap();
+        let dst = out.as_slice_mut().unwrap();
+        for b in 0..batch {
+            let src_base = b * d1 * d2;
+            let dst_base = b * d2 * d1;
+            for i in 0..d1 {
+                for j in 0..d2 {
+                    dst[dst_base + j * d1 + i] = src[src_base + i * d2 + j];
+                }
+            }
+        }
+        Self { data: out }
     }
 
     /// Apply GELU activation element-wise.
@@ -141,15 +169,10 @@ impl Tensor3 {
         assert_eq!(k1, k2, "inner dimension mismatch");
         let mut out = Array3::<f32>::zeros((b1, m, n));
         for b in 0..b1 {
-            for i in 0..m {
-                for j in 0..n {
-                    let mut sum = 0.0f32;
-                    for k in 0..k1 {
-                        sum += self.data[[b, i, k]] * other.data[[b, k, j]];
-                    }
-                    out[[b, i, j]] = sum;
-                }
-            }
+            let a = self.data.index_axis(Axis(0), b);
+            let b_mat = other.data.index_axis(Axis(0), b);
+            let result = a.dot(&b_mat);
+            out.index_axis_mut(Axis(0), b).assign(&result);
         }
         Self { data: out }
     }

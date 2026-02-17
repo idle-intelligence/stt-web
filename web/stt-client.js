@@ -87,6 +87,9 @@ export class SttClient {
             throw new Error('Client not initialized. Call init() first.');
         }
 
+        // Reset engine state for a clean recording session
+        this.worker.postMessage({ type: 'reset' });
+
         // Request microphone access
         this.mediaStream = await navigator.mediaDevices.getUserMedia({
             audio: {
@@ -106,19 +109,30 @@ export class SttClient {
         // Create worklet node
         this.workletNode = new AudioWorkletNode(this.audioContext, 'audio-processor');
 
-        // Forward audio chunks from worklet to worker
+        // Forward audio chunks from worklet to worker.
+        // When the worklet sends 'done' (after flushing remaining samples on stop),
+        // we forward 'stop' to the worker — guaranteeing all audio arrives before stop.
         this.workletNode.port.onmessage = (e) => {
             if (e.data.type === 'audio') {
                 this.worker.postMessage(
                     { type: 'audio', samples: e.data.samples },
                     [e.data.samples.buffer]
                 );
+            } else if (e.data.type === 'done') {
+                // All audio has been flushed — now safe to tell the worker to stop.
+                this.worker.postMessage({ type: 'stop' });
             }
         };
 
-        // Connect mic → worklet (no output needed, we just process)
+        // Connect mic → worklet → destination.
+        // Web Audio API is pull-based: the destination pulls audio from its inputs
+        // recursively. Without connecting the worklet to the destination, Chrome
+        // will not call process() on the worklet and no audio is captured.
+        // The worklet doesn't write to its output buffer, so only silence reaches
+        // the speakers.
         const source = this.audioContext.createMediaStreamSource(this.mediaStream);
         source.connect(this.workletNode);
+        this.workletNode.connect(this.audioContext.destination);
     }
 
     /** Stop recording and flush remaining text. */
@@ -127,12 +141,37 @@ export class SttClient {
             return;
         }
 
-        // Signal worklet to stop
+        // Signal worklet to stop. The worklet will:
+        //   1. Set _active = false
+        //   2. On the next process() call: flush remaining buffered samples, then
+        //      send { type: 'done' } to signal completion
+        // The port.onmessage handler (set in startRecording) receives 'done' and
+        // forwards { type: 'stop' } to the worker, guaranteeing all audio arrives
+        // before the stop command. A fallback timeout handles the edge case where
+        // the worklet is disconnected before it can send 'done'.
         if (this.workletNode) {
+            // Capture worker reference before nulling the worklet
+            const worker = this.worker;
+            const fallback = setTimeout(() => {
+                worker.postMessage({ type: 'stop' });
+            }, 500);
+
+            // Override the done handler to also clear the fallback
+            const prevOnMessage = this.workletNode.port.onmessage;
+            this.workletNode.port.onmessage = (e) => {
+                prevOnMessage(e);
+                if (e.data.type === 'done') {
+                    clearTimeout(fallback);
+                }
+            };
+
             this.workletNode.port.postMessage({ type: 'stop' });
+        } else {
+            // No worklet — send stop directly
+            this.worker.postMessage({ type: 'stop' });
         }
 
-        // Disconnect audio graph
+        // Disconnect audio graph (stop receiving mic input)
         if (this.workletNode) {
             this.workletNode.disconnect();
             this.workletNode = null;
@@ -144,14 +183,12 @@ export class SttClient {
             this.mediaStream = null;
         }
 
-        // Close audio context
-        if (this.audioContext) {
-            this.audioContext.close();
-            this.audioContext = null;
+        // Close audio context after a brief delay to let the worklet flush
+        const ctx = this.audioContext;
+        this.audioContext = null;
+        if (ctx) {
+            setTimeout(() => ctx.close(), 200);
         }
-
-        // Send stop to worker to flush
-        this.worker.postMessage({ type: 'stop' });
     }
 
     /** Reset state for a new session (without reloading model). */

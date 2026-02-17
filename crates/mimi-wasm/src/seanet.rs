@@ -4,7 +4,6 @@
 
 use crate::conv::Conv1d;
 use crate::tensor::Tensor3;
-use ndarray::Array1;
 
 /// Residual block in SEANet.
 #[derive(Clone, Debug)]
@@ -17,9 +16,9 @@ pub struct ResidualBlock {
 impl ResidualBlock {
     pub fn forward(&self, x: &Tensor3) -> Tensor3 {
         // SEANet residual block: ELU → Conv1 → ELU → Conv2
-        let residual = x.elu(1.0);
-        let residual = self.conv1.forward(&residual);
-        let residual = residual.elu(1.0);
+        let mut residual = x.elu(1.0);
+        residual = self.conv1.forward(&residual);
+        residual.elu_inplace(1.0);
         let residual = self.conv2.forward(&residual);
 
         // Add shortcut connection
@@ -58,7 +57,7 @@ impl EncoderLayer {
         }
 
         // ELU before downsample
-        x = x.elu(1.0);
+        x.elu_inplace(1.0);
         self.downsample.forward(&x)
     }
 
@@ -88,7 +87,7 @@ impl SeaNetEncoder {
     pub fn forward(&self, x: &Tensor3) -> Tensor3 {
         // Initial convolution
         let mut x = self.init_conv.forward(x);
-        x = x.elu(1.0);
+        x.elu_inplace(1.0);
 
         // Encoder layers
         for layer in &self.layers {
@@ -96,7 +95,7 @@ impl SeaNetEncoder {
         }
 
         // ELU before final convolution
-        x = x.elu(1.0);
+        x.elu_inplace(1.0);
         self.final_conv.forward(&x)
     }
 

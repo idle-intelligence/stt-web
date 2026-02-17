@@ -21,6 +21,7 @@ import { SpmDecoder } from './tokenizer.js';
 let engine = null;
 let sttWasm = null;
 let tokenizer = null;
+let audioBuffer = [];  // Buffer audio chunks for batch encoding
 
 // Serialize all engine access to prevent wasm-bindgen "recursive use" errors.
 // The WASM engine uses &mut self, so only one call can be active at a time.
@@ -209,35 +210,59 @@ async function handleLoad(config) {
 async function handleAudio({ samples }) {
     if (!engine || !tokenizer) return;
 
-    // Ensure we have a Float32Array.
+    // Buffer audio chunks — they'll be batch-encoded on stop.
     const audioData = samples instanceof Float32Array
         ? samples
         : new Float32Array(samples);
 
-    // feedAudio returns Vec<u32> of text token IDs
-    const tokenIds = await engine.feedAudio(audioData);
-    const ids = tokenIds ? Array.from(tokenIds) : [];
-    console.log('[worker] feedAudio →', ids);
+    audioBuffer.push(audioData);
 
-    if (ids.length > 0) {
-        const text = tokenizer.decode(ids);
-        self.postMessage({ type: 'transcript', text, final: false });
-    }
+    const totalSamples = audioBuffer.reduce((s, c) => s + c.length, 0);
+    const duration = (totalSamples / 24000).toFixed(1);
+    self.postMessage({ type: 'status', text: `Recording... ${duration}s` });
 }
 
 async function handleStop() {
     if (!engine || !tokenizer) return;
 
-    // flush() returns Vec<u32> of remaining text token IDs
-    const tokenIds = await engine.flush();
-    const text = tokenIds && tokenIds.length > 0
-        ? tokenizer.decode(Array.from(tokenIds))
-        : '';
+    // Concatenate all buffered audio into a single Float32Array.
+    const totalSamples = audioBuffer.reduce((s, c) => s + c.length, 0);
+    if (totalSamples === 0) {
+        self.postMessage({ type: 'transcript', text: '', final: true });
+        return;
+    }
+
+    const allAudio = new Float32Array(totalSamples);
+    let offset = 0;
+    for (const chunk of audioBuffer) {
+        allAudio.set(chunk, offset);
+        offset += chunk.length;
+    }
+    audioBuffer = [];
+
+    const duration = (totalSamples / 24000).toFixed(1);
+    self.postMessage({ type: 'status', text: `Transcribing ${duration}s of audio...` });
+    console.log(`[worker] Batch encoding ${totalSamples} samples (${duration}s)`);
+
+    // Batch encode + STT in one call
+    const tokenIds = await engine.feedAudio(allAudio);
+    const ids = tokenIds ? Array.from(tokenIds) : [];
+    console.log('[worker] feedAudio →', ids.length, 'tokens');
+
+    // Flush remaining delayed tokens
+    const flushIds = await engine.flush();
+    const fids = flushIds ? Array.from(flushIds) : [];
+    console.log('[worker] flush →', fids.length, 'tokens');
+
+    const allIds = ids.concat(fids);
+    const text = allIds.length > 0 ? tokenizer.decode(allIds) : '';
 
     self.postMessage({ type: 'transcript', text, final: true });
+    self.postMessage({ type: 'status', text: 'Ready' });
 }
 
 function handleReset() {
+    audioBuffer = [];
     if (!engine) {
         return;
     }

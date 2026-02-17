@@ -2,7 +2,7 @@
 //!
 //! Implements Conv1d and ConvTranspose1d with streaming support.
 
-use crate::tensor::{Tensor1, Tensor3};
+use crate::tensor::Tensor3;
 use ndarray::{Array1, Array2, Array3};
 
 /// 1D convolution layer.
@@ -10,12 +10,17 @@ use ndarray::{Array1, Array2, Array3};
 pub struct Conv1d {
     /// Weight tensor: (out_channels, in_channels, kernel_size)
     pub weight: Array3<f32>,
+    /// Pre-reshaped weight matrix: (out_channels, in_channels * kernel_size)
+    weight_mat: Array2<f32>,
     /// Bias vector: (out_channels,)
     pub bias: Option<Array1<f32>>,
     pub stride: usize,
     pub dilation: usize,
     pub groups: usize,
     pub causal: bool,
+    out_channels: usize,
+    in_channels: usize,
+    kernel_size: usize,
     /// Buffered input for streaming (per batch).
     buffer: Vec<Array2<f32>>, // Vec of (in_channels, buffer_time)
 }
@@ -30,38 +35,54 @@ impl Conv1d {
         groups: usize,
         causal: bool,
     ) -> Self {
+        let out_channels = weight.shape()[0];
+        let in_channels = weight.shape()[1];
+        let kernel_size = weight.shape()[2];
+        let col_rows = in_channels * kernel_size;
+
+        // Pre-compute the reshaped weight matrix
+        let weight_mat = weight
+            .view()
+            .into_shape_with_order((out_channels, col_rows))
+            .expect("weight reshape")
+            .to_owned();
+
         Self {
             weight,
+            weight_mat,
             bias,
             stride,
             dilation,
             groups,
             causal,
+            out_channels,
+            in_channels,
+            kernel_size,
             buffer: Vec::new(),
         }
     }
 
     /// Get output channels.
     pub fn out_channels(&self) -> usize {
-        self.weight.shape()[0]
+        self.out_channels
     }
 
     /// Get input channels.
     pub fn in_channels(&self) -> usize {
-        self.weight.shape()[1]
+        self.in_channels
     }
 
     /// Get kernel size.
     pub fn kernel_size(&self) -> usize {
-        self.weight.shape()[2]
+        self.kernel_size
     }
 
     /// Calculate padding for causal convolution.
     fn padding(&self) -> usize {
         if self.causal {
-            (self.kernel_size() - 1) * self.dilation
+            (self.kernel_size - 1) * self.dilation
         } else {
-            ((self.kernel_size() - 1) * self.dilation) / 2
+            ((self.kernel_size - 1) * self.dilation) / 2
         }
     }
 
@@ -73,46 +94,160 @@ impl Conv1d {
     ///   output = weight_mat . col_mat → (out_channels, out_time)
     pub fn forward(&self, input: &Tensor3) -> Tensor3 {
         let (batch, in_c, time) = input.shape();
-        assert_eq!(in_c, self.in_channels(), "Input channels mismatch");
+        assert_eq!(in_c, self.in_channels, "Input channels mismatch");
 
         let padding = self.padding();
-        let ks = self.kernel_size();
-        let out_time = (time + padding - self.dilation * (ks - 1)) / self.stride;
+        let ks = self.kernel_size;
+        let out_c = self.out_channels;
+        let stride = self.stride;
+        let dilation = self.dilation;
+        let out_time = (time + padding - dilation * (ks - 1)) / stride;
         let col_rows = in_c * ks;
 
-        // Reshape weight: (out_channels, in_channels, kernel_size) → (out_channels, in_channels * kernel_size)
-        let weight_mat = self.weight
-            .view()
-            .into_shape_with_order((self.out_channels(), col_rows))
-            .expect("weight reshape");
+        // Special case: kernel_size=1, stride=1, dilation=1 → direct matmul
+        if ks == 1 && stride == 1 && dilation == 1 {
+            return self.forward_1x1(input, batch, in_c, time, out_c);
+        }
 
-        let mut output = Array3::<f32>::zeros((batch, self.out_channels(), out_time));
+        let mut output = Array3::<f32>::zeros((batch, out_c, out_time));
+
+        // Get raw slice access to input data for faster indexing
+        let input_slice = input.data.as_slice().unwrap();
 
         for b in 0..batch {
-            // Build im2col matrix: (in_channels * kernel_size, out_time)
-            let mut col = Array2::<f32>::zeros((col_rows, out_time));
+            let b_input_offset = b * in_c * time;
 
-            for t_out in 0..out_time {
-                let t_base = t_out * self.stride;
+            // Build im2col matrix: (col_rows, out_time) using raw slices
+            let mut col = Array2::<f32>::zeros((col_rows, out_time));
+            let col_slice = col.as_slice_mut().unwrap();
+
+            if dilation == 1 && stride == 1 {
+                // Highly optimized path for stride=1, dilation=1: bulk memcpy
+                // For each (ic, k), the valid output range is contiguous in input
                 for ic in 0..in_c {
-                    let col_offset = ic * ks;
+                    let ic_input_base = b_input_offset + ic * time;
+                    let col_ic_base = ic * ks;
                     for k in 0..ks {
-                        let t_in = t_base + k * self.dilation;
-                        if t_in >= padding && t_in - padding < time {
-                            col[[col_offset + k, t_out]] = input.data[[b, ic, t_in - padding]];
+                        let col_row = col_ic_base + k;
+                        let col_row_base = col_row * out_time;
+                        // t_in = t_out + k, valid when t_out + k >= padding
+                        // AND t_out + k - padding < time
+                        let t_start = if k >= padding { 0 } else { padding - k };
+                        let t_end_limit = if time + padding >= k { time + padding - k } else { 0 };
+                        let t_end = out_time.min(t_end_limit);
+                        if t_start < t_end {
+                            let len = t_end - t_start;
+                            let src_start = ic_input_base + t_start + k - padding;
+                            let dst_start = col_row_base + t_start;
+                            col_slice[dst_start..dst_start + len]
+                                .copy_from_slice(&input_slice[src_start..src_start + len]);
+                        }
+                    }
+                }
+            } else if dilation == 1 {
+                // Optimized path for dilation=1 with stride > 1: bulk copy per row
+                for ic in 0..in_c {
+                    let ic_input_base = b_input_offset + ic * time;
+                    let col_ic_base = ic * ks;
+                    for k in 0..ks {
+                        let col_row = col_ic_base + k;
+                        let col_row_base = col_row * out_time;
+                        // For stride > 1: t_in = t_out * stride + k
+                        // valid when: t_out * stride + k >= padding
+                        // AND t_out * stride + k - padding < time
+                        let t_start = if k >= padding { 0 } else { (padding - k + stride - 1) / stride };
+                        let t_end = if time + padding > k {
+                            ((time + padding - k - 1) / stride + 1).min(out_time)
+                        } else {
+                            0
+                        };
+                        for t_out in t_start..t_end {
+                            let t_in = t_out * stride + k;
+                            col_slice[col_row_base + t_out] =
+                                input_slice[ic_input_base + t_in - padding];
+                        }
+                    }
+                }
+            } else {
+                // General path with dilation
+                for t_out in 0..out_time {
+                    let t_base = t_out * stride;
+                    for ic in 0..in_c {
+                        let col_offset = ic * ks;
+                        let ic_input_base = b_input_offset + ic * time;
+                        for k in 0..ks {
+                            let t_in = t_base + k * dilation;
+                            if t_in >= padding && t_in - padding < time {
+                                let col_idx = (col_offset + k) * out_time + t_out;
+                                col_slice[col_idx] =
+                                    input_slice[ic_input_base + t_in - padding];
+                            }
                         }
                     }
                 }
             }
 
             // GEMM: (out_channels, col_rows) . (col_rows, out_time) → (out_channels, out_time)
-            let result = weight_mat.dot(&col);
+            let result = self.weight_mat.dot(&col);
 
-            // Copy result + bias
-            for oc in 0..self.out_channels() {
-                let bias_val = self.bias.as_ref().map_or(0.0, |b| b[oc]);
-                for t in 0..out_time {
-                    output[[b, oc, t]] = result[[oc, t]] + bias_val;
+            // Copy result + bias using raw slices
+            let result_slice = result.as_slice().unwrap();
+            let output_slice = output.as_slice_mut().unwrap();
+            let b_output_offset = b * out_c * out_time;
+
+            match &self.bias {
+                Some(bias) => {
+                    let bias_slice = bias.as_slice().unwrap();
+                    for oc in 0..out_c {
+                        let bias_val = bias_slice[oc];
+                        let r_base = oc * out_time;
+                        let o_base = b_output_offset + oc * out_time;
+                        for t in 0..out_time {
+                            output_slice[o_base + t] = result_slice[r_base + t] + bias_val;
+                        }
+                    }
+                }
+                None => {
+                    let src = &result_slice[..out_c * out_time];
+                    let dst = &mut output_slice[b_output_offset..b_output_offset + out_c * out_time];
+                    dst.copy_from_slice(src);
+                }
+            }
+        }
+
+        Tensor3::new(output)
+    }
+
+    /// Optimized forward pass for 1x1 convolution (no im2col needed).
+    fn forward_1x1(&self, input: &Tensor3, batch: usize, in_c: usize, time: usize, out_c: usize) -> Tensor3 {
+        let mut output = Array3::<f32>::zeros((batch, out_c, time));
+
+        for b in 0..batch {
+            // Input slice for this batch: (in_c, time) viewed as (in_c, time)
+            // weight_mat is (out_c, in_c) for ks=1
+            // output = weight_mat @ input_batch → (out_c, time)
+            let input_view = input.data.index_axis(ndarray::Axis(0), b);
+            let result = self.weight_mat.dot(&input_view);
+
+            let result_slice = result.as_slice().unwrap();
+            let output_slice = output.as_slice_mut().unwrap();
+            let b_offset = b * out_c * time;
+
+            match &self.bias {
+                Some(bias) => {
+                    let bias_slice = bias.as_slice().unwrap();
+                    for oc in 0..out_c {
+                        let bias_val = bias_slice[oc];
+                        let base = oc * time;
+                        let o_base = b_offset + base;
+                        for t in 0..time {
+                            output_slice[o_base + t] = result_slice[base + t] + bias_val;
+                        }
+                    }
+                }
+                None => {
+                    let n = out_c * time;
+                    output_slice[b_offset..b_offset + n].copy_from_slice(&result_slice[..n]);
                 }
             }
         }
@@ -124,7 +259,7 @@ impl Conv1d {
     pub fn init_buffer(&mut self, batch_size: usize) {
         let buffer_len = if self.causal { self.padding() } else { 0 };
         self.buffer = (0..batch_size)
-            .map(|_| Array2::zeros((self.in_channels(), buffer_len)))
+            .map(|_| Array2::zeros((self.in_channels, buffer_len)))
             .collect();
     }
 

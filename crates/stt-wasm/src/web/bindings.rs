@@ -210,11 +210,10 @@ impl SttEngine {
             .as_mut()
             .ok_or_else(|| JsError::new("Stream not initialized."))?;
 
-        // Encode audio to Mimi tokens
-        let tokens = mimi.feed_audio(samples);
+        // Encode audio to Mimi tokens (batch mode — processes all at once)
+        let tokens = mimi.encode_all(samples);
 
         if !tokens.is_empty() {
-            // Log first frame of Mimi tokens for debugging
             let preview: Vec<u32> = tokens.iter().take(32).copied().collect();
             wasm_log(&format!(
                 "[stt] Mimi: {} samples → {} tokens, first frame: {:?}",

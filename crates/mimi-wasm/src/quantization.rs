@@ -4,22 +4,41 @@
 //! Each sub-RVQ has input/output projections between model dimension (512) and codebook dimension (256).
 
 use crate::tensor::Tensor3;
-use ndarray::{Array2, Array3};
+use ndarray::{Array1, Array2, Array3};
 
 /// Single vector quantizer codebook.
 #[derive(Clone, Debug)]
 pub struct VectorQuantizer {
     /// Codebook: (num_bins, dim)
     pub codebook: Array2<f32>,
+    /// Pre-computed squared norms for each codebook entry: (num_bins,)
+    codebook_sq_norms: Array1<f32>,
 }
 
 impl VectorQuantizer {
     pub fn new(codebook: Array2<f32>) -> Self {
-        Self { codebook }
+        // Pre-compute ||c||² for each codebook entry
+        let num_bins = codebook.shape()[0];
+        let dim = codebook.shape()[1];
+        let mut codebook_sq_norms = Array1::<f32>::zeros(num_bins);
+        let cb_slice = codebook.as_slice().unwrap();
+        for i in 0..num_bins {
+            let mut norm = 0.0f32;
+            let base = i * dim;
+            for d in 0..dim {
+                let v = cb_slice[base + d];
+                norm += v * v;
+            }
+            codebook_sq_norms[i] = norm;
+        }
+        Self { codebook, codebook_sq_norms }
     }
 
-    /// Quantize vectors to nearest codebook entry.
-    /// Returns (quantized_vectors, indices).
+    /// Quantize vectors to nearest codebook entry using GEMM.
+    ///
+    /// dist(x, c) = ||x||² - 2*x·c + ||c||²
+    /// Since ||x||² is constant across codebook entries, we just need
+    /// argmin_c(-2*x·c + ||c||²) = argmin_c(||c||² - 2*x·c)
     pub fn encode(&self, x: &Tensor3) -> (Tensor3, Array3<u32>) {
         let (batch, channels, time) = x.shape();
         let num_bins = self.codebook.shape()[0];
@@ -30,29 +49,44 @@ impl VectorQuantizer {
         let mut quantized = Array3::<f32>::zeros((batch, channels, time));
         let mut indices = Array3::<u32>::zeros((batch, 1, time));
 
-        // For each batch and time step, find nearest codebook entry
         for b in 0..batch {
+            // Extract input matrix: (time, dim) from (batch, dim, time)
+            let mut x_mat = Array2::<f32>::zeros((time, dim));
+            let x_slice = x.data.as_slice().unwrap();
+            let b_offset = b * channels * time;
+            for t in 0..time {
+                for d in 0..dim {
+                    x_mat[[t, d]] = x_slice[b_offset + d * time + t];
+                }
+            }
+
+            // GEMM: dots = x_mat @ codebook.T → (time, num_bins)
+            // dots[t, i] = x[t] · codebook[i]
+            let dots = x_mat.dot(&self.codebook.t());
+
+            // Find argmin of (||c||² - 2*x·c) for each time step
+            let dots_slice = dots.as_slice().unwrap();
+            let norms_slice = self.codebook_sq_norms.as_slice().unwrap();
+            let cb_slice = self.codebook.as_slice().unwrap();
+            let q_slice = quantized.as_slice_mut().unwrap();
+
             for t in 0..time {
                 let mut min_dist = f32::INFINITY;
                 let mut best_idx = 0u32;
+                let row_base = t * num_bins;
 
-                // Extract input vector at (b, :, t)
-                for bin_idx in 0..num_bins {
-                    let mut dist = 0.0;
-                    for c in 0..dim {
-                        let diff = x.data[[b, c, t]] - self.codebook[[bin_idx, c]];
-                        dist += diff * diff;
-                    }
-
+                for i in 0..num_bins {
+                    let dist = norms_slice[i] - 2.0 * dots_slice[row_base + i];
                     if dist < min_dist {
                         min_dist = dist;
-                        best_idx = bin_idx as u32;
+                        best_idx = i as u32;
                     }
                 }
 
                 // Store quantized vector
-                for c in 0..dim {
-                    quantized[[b, c, t]] = self.codebook[[best_idx as usize, c]];
+                let cb_base = best_idx as usize * dim;
+                for d in 0..dim {
+                    q_slice[b_offset + d * time + t] = cb_slice[cb_base + d];
                 }
                 indices[[b, 0, t]] = best_idx;
             }
@@ -113,18 +147,36 @@ impl ResidualVectorQuantizer {
     }
 
     /// Project input: (batch, input_dim, time) → (batch, codebook_dim, time)
+    /// Uses GEMM: transpose to (batch, time, input_dim), multiply by proj.T, transpose back.
     fn project_input(&self, x: &Tensor3) -> Tensor3 {
         let (batch, in_dim, time) = x.shape();
         let cb_dim = self.input_proj.shape()[0];
         let mut projected = Array3::<f32>::zeros((batch, cb_dim, time));
+
+        // proj.T: (in_dim, cb_dim)
+        let proj_t = self.input_proj.t();
+
         for b in 0..batch {
+            // Build (time, in_dim) from (batch, in_dim, time)
+            let mut x_mat = Array2::<f32>::zeros((time, in_dim));
+            let x_slice = x.data.as_slice().unwrap();
+            let b_offset = b * in_dim * time;
             for t in 0..time {
-                for c_out in 0..cb_dim {
-                    let mut sum = 0.0;
-                    for c_in in 0..in_dim {
-                        sum += self.input_proj[[c_out, c_in]] * x.data[[b, c_in, t]];
-                    }
-                    projected[[b, c_out, t]] = sum;
+                for d in 0..in_dim {
+                    x_mat[[t, d]] = x_slice[b_offset + d * time + t];
+                }
+            }
+
+            // GEMM: (time, in_dim) @ (in_dim, cb_dim) → (time, cb_dim)
+            let result = x_mat.dot(&proj_t);
+
+            // Copy back to (batch, cb_dim, time)
+            let p_slice = projected.as_slice_mut().unwrap();
+            let r_slice = result.as_slice().unwrap();
+            let p_b_offset = b * cb_dim * time;
+            for t in 0..time {
+                for d in 0..cb_dim {
+                    p_slice[p_b_offset + d * time + t] = r_slice[t * cb_dim + d];
                 }
             }
         }

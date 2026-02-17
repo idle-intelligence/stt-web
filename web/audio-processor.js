@@ -37,6 +37,10 @@ class AudioProcessor extends AudioWorkletProcessor {
                 this.port.postMessage({ type: 'audio', samples: remaining }, [remaining.buffer]);
                 this._writePos = 0;
             }
+            // Signal the main thread that the worklet is done sending audio.
+            // The main thread uses this to know when to send { type: 'stop' } to
+            // the worker — ensuring all audio chunks arrive before the stop command.
+            this.port.postMessage({ type: 'done' });
             return false; // Remove processor from the graph.
         }
 
