@@ -162,11 +162,10 @@ async function cachedFetch(url, label) {
 async function handleLoad(config) {
     const base = (config.baseUrl || '').replace(/\/+$/, '');
 
-    // 1. Import WASM module (cache-bust during dev).
+    // 1. Import WASM module.
     self.postMessage({ type: 'status', text: 'Loading WASM module...' });
-    const cacheBust = '?v=' + Date.now();
-    sttWasm = await import(base + '/pkg/stt_wasm.js' + cacheBust);
-    await sttWasm.default(base + '/pkg/stt_wasm_bg.wasm' + cacheBust);
+    sttWasm = await import(base + '/pkg/stt_wasm.js');
+    await sttWasm.default(base + '/pkg/stt_wasm_bg.wasm');
 
     // 2. Initialize WebGPU device.
     self.postMessage({ type: 'status', text: 'Initializing WebGPU device...' });

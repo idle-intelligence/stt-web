@@ -33,7 +33,7 @@ export class SttClient {
 
         // URL configuration for embedding
         this.baseUrl = (options.baseUrl || '').replace(/\/+$/, '');
-        this.workerUrl = options.workerUrl || (this.baseUrl + '/worker.js?v=' + Date.now());
+        this.workerUrl = options.workerUrl || (this.baseUrl + '/worker.js');
         this.audioProcessorUrl = options.audioProcessorUrl || (this.baseUrl + '/audio-processor.js');
 
         // Optional overrides passed to the worker
