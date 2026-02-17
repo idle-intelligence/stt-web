@@ -34,11 +34,13 @@ impl VectorQuantizer {
         Self { codebook, codebook_sq_norms }
     }
 
-    /// Quantize vectors to nearest codebook entry using GEMM.
+    /// Quantize vectors to nearest codebook entry.
     ///
     /// dist(x, c) = ||x||² - 2*x·c + ||c||²
     /// Since ||x||² is constant across codebook entries, we just need
     /// argmin_c(-2*x·c + ||c||²) = argmin_c(||c||² - 2*x·c)
+    ///
+    /// Uses matrix-vector product for time=1 (streaming) or GEMM for time>1.
     pub fn encode(&self, x: &Tensor3) -> (Tensor3, Array3<u32>) {
         let (batch, channels, time) = x.shape();
         let num_bins = self.codebook.shape()[0];
@@ -49,46 +51,79 @@ impl VectorQuantizer {
         let mut quantized = Array3::<f32>::zeros((batch, channels, time));
         let mut indices = Array3::<u32>::zeros((batch, 1, time));
 
+        let x_slice = x.data.as_slice().unwrap();
+        let norms_slice = self.codebook_sq_norms.as_slice().unwrap();
+        let cb_slice = self.codebook.as_slice().unwrap();
+
         for b in 0..batch {
-            // Extract input matrix: (time, dim) from (batch, dim, time)
-            let mut x_mat = Array2::<f32>::zeros((time, dim));
-            let x_slice = x.data.as_slice().unwrap();
             let b_offset = b * channels * time;
-            for t in 0..time {
-                for d in 0..dim {
-                    x_mat[[t, d]] = x_slice[b_offset + d * time + t];
-                }
-            }
-
-            // GEMM: dots = x_mat @ codebook.T → (time, num_bins)
-            // dots[t, i] = x[t] · codebook[i]
-            let dots = x_mat.dot(&self.codebook.t());
-
-            // Find argmin of (||c||² - 2*x·c) for each time step
-            let dots_slice = dots.as_slice().unwrap();
-            let norms_slice = self.codebook_sq_norms.as_slice().unwrap();
-            let cb_slice = self.codebook.as_slice().unwrap();
             let q_slice = quantized.as_slice_mut().unwrap();
 
-            for t in 0..time {
-                let mut min_dist = f32::INFINITY;
-                let mut best_idx = 0u32;
-                let row_base = t * num_bins;
+            if time <= 2 {
+                // Optimized path for streaming (time=1 or 2):
+                // Use matrix-vector product per timestep to avoid temp allocations
+                for t in 0..time {
+                    // Extract input vector from (B, C, T) layout
+                    let mut x_vec = Array1::<f32>::zeros(dim);
+                    let xv = x_vec.as_slice_mut().unwrap();
+                    for d in 0..dim {
+                        xv[d] = x_slice[b_offset + d * time + t];
+                    }
 
-                for i in 0..num_bins {
-                    let dist = norms_slice[i] - 2.0 * dots_slice[row_base + i];
-                    if dist < min_dist {
-                        min_dist = dist;
-                        best_idx = i as u32;
+                    // Matvec: codebook @ x_vec → (num_bins,) dot products
+                    let dots = self.codebook.dot(&x_vec);
+                    let dots_s = dots.as_slice().unwrap();
+
+                    // Find argmin of (||c||² - 2*x·c)
+                    let mut min_dist = f32::INFINITY;
+                    let mut best_idx = 0u32;
+                    for i in 0..num_bins {
+                        let dist = norms_slice[i] - 2.0 * dots_s[i];
+                        if dist < min_dist {
+                            min_dist = dist;
+                            best_idx = i as u32;
+                        }
+                    }
+
+                    // Store quantized vector in (B, C, T) layout
+                    let cb_base = best_idx as usize * dim;
+                    for d in 0..dim {
+                        q_slice[b_offset + d * time + t] = cb_slice[cb_base + d];
+                    }
+                    indices[[b, 0, t]] = best_idx;
+                }
+            } else {
+                // GEMM path for larger time dimensions
+                let mut x_mat = Array2::<f32>::zeros((time, dim));
+                let xm = x_mat.as_slice_mut().unwrap();
+                for t in 0..time {
+                    for d in 0..dim {
+                        xm[t * dim + d] = x_slice[b_offset + d * time + t];
                     }
                 }
 
-                // Store quantized vector
-                let cb_base = best_idx as usize * dim;
-                for d in 0..dim {
-                    q_slice[b_offset + d * time + t] = cb_slice[cb_base + d];
+                let dots = x_mat.dot(&self.codebook.t());
+                let dots_slice = dots.as_slice().unwrap();
+
+                for t in 0..time {
+                    let mut min_dist = f32::INFINITY;
+                    let mut best_idx = 0u32;
+                    let row_base = t * num_bins;
+
+                    for i in 0..num_bins {
+                        let dist = norms_slice[i] - 2.0 * dots_slice[row_base + i];
+                        if dist < min_dist {
+                            min_dist = dist;
+                            best_idx = i as u32;
+                        }
+                    }
+
+                    let cb_base = best_idx as usize * dim;
+                    for d in 0..dim {
+                        q_slice[b_offset + d * time + t] = cb_slice[cb_base + d];
+                    }
+                    indices[[b, 0, t]] = best_idx;
                 }
-                indices[[b, 0, t]] = best_idx;
             }
         }
 
@@ -147,36 +182,51 @@ impl ResidualVectorQuantizer {
     }
 
     /// Project input: (batch, input_dim, time) → (batch, codebook_dim, time)
-    /// Uses GEMM: transpose to (batch, time, input_dim), multiply by proj.T, transpose back.
+    /// Uses matvec for time<=2 (streaming), GEMM for larger time.
     fn project_input(&self, x: &Tensor3) -> Tensor3 {
         let (batch, in_dim, time) = x.shape();
         let cb_dim = self.input_proj.shape()[0];
         let mut projected = Array3::<f32>::zeros((batch, cb_dim, time));
 
-        // proj.T: (in_dim, cb_dim)
-        let proj_t = self.input_proj.t();
+        let x_slice = x.data.as_slice().unwrap();
+        let p_slice = projected.as_slice_mut().unwrap();
 
         for b in 0..batch {
-            // Build (time, in_dim) from (batch, in_dim, time)
-            let mut x_mat = Array2::<f32>::zeros((time, in_dim));
-            let x_slice = x.data.as_slice().unwrap();
             let b_offset = b * in_dim * time;
-            for t in 0..time {
-                for d in 0..in_dim {
-                    x_mat[[t, d]] = x_slice[b_offset + d * time + t];
-                }
-            }
-
-            // GEMM: (time, in_dim) @ (in_dim, cb_dim) → (time, cb_dim)
-            let result = x_mat.dot(&proj_t);
-
-            // Copy back to (batch, cb_dim, time)
-            let p_slice = projected.as_slice_mut().unwrap();
-            let r_slice = result.as_slice().unwrap();
             let p_b_offset = b * cb_dim * time;
-            for t in 0..time {
-                for d in 0..cb_dim {
-                    p_slice[p_b_offset + d * time + t] = r_slice[t * cb_dim + d];
+
+            if time <= 2 {
+                // Streaming path: matvec per timestep (avoids temp matrix allocation)
+                for t in 0..time {
+                    let mut x_vec = Array1::<f32>::zeros(in_dim);
+                    let xv = x_vec.as_slice_mut().unwrap();
+                    for d in 0..in_dim {
+                        xv[d] = x_slice[b_offset + d * time + t];
+                    }
+
+                    // input_proj @ x_vec: (cb_dim, in_dim) @ (in_dim,) → (cb_dim,)
+                    let result = self.input_proj.dot(&x_vec);
+                    let r_s = result.as_slice().unwrap();
+                    for d in 0..cb_dim {
+                        p_slice[p_b_offset + d * time + t] = r_s[d];
+                    }
+                }
+            } else {
+                // GEMM path: transpose, multiply, transpose back
+                let proj_t = self.input_proj.t();
+                let mut x_mat = Array2::<f32>::zeros((time, in_dim));
+                let xm = x_mat.as_slice_mut().unwrap();
+                for t in 0..time {
+                    for d in 0..in_dim {
+                        xm[t * in_dim + d] = x_slice[b_offset + d * time + t];
+                    }
+                }
+                let result = x_mat.dot(&proj_t);
+                let r_slice = result.as_slice().unwrap();
+                for t in 0..time {
+                    for d in 0..cb_dim {
+                        p_slice[p_b_offset + d * time + t] = r_slice[t * cb_dim + d];
+                    }
                 }
             }
         }

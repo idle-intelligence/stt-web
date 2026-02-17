@@ -8,6 +8,9 @@ description = "Kyutai STT 1B transformer in Burn+wgpu — runs natively and in b
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
 [features]
 default = ["wgpu", "native-tokenizer"]
 wgpu = ["burn/wgpu", "burn/template"]
@@ -24,6 +27,7 @@ wasm = [
     "mimi-wasm/wasm",
 ]
 cli = ["clap", "indicatif"]
+
 hub = ["hf-hub"]
 
 [dependencies]
@@ -72,3 +76,4 @@ required-features = ["cli"]
 [dev-dependencies]
 approx = "0.5"
 pollster = "0.4"
+

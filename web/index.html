@@ -149,6 +149,42 @@
             font-family: 'SF Mono', Monaco, Consolas, monospace;
             display: none;
         }
+        #metricsCard {
+            display: none;
+        }
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.75rem;
+        }
+        .metric {
+            text-align: center;
+        }
+        .metric-value {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #007aff;
+        }
+        .metric-label {
+            font-size: 0.7rem;
+            color: #999;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin-top: 0.15rem;
+        }
+        .streaming-cursor {
+            display: inline-block;
+            width: 2px;
+            height: 1em;
+            background: #007aff;
+            margin-left: 2px;
+            vertical-align: text-bottom;
+            animation: blink 0.7s infinite;
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+        }
     </style>
 </head>
 <body>
@@ -185,8 +221,38 @@
 
     <div class="card">
         <h2>Transcript</h2>
-        <div id="transcript" class="empty">Transcript will appear here as you speak...</div>
+        <div id="transcript" class="empty"><span id="transcriptText">Transcript will appear here as you speak...</span><span id="streamingCursor" class="streaming-cursor" style="display:none"></span></div>
         <div id="rtfInfo"></div>
+    </div>
+
+    <div class="card" id="metricsCard">
+        <h2>Performance</h2>
+        <div class="metrics-grid">
+            <div class="metric">
+                <div class="metric-value" id="metricTtfb">—</div>
+                <div class="metric-label">TTFB (ms)</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value" id="metricFps">—</div>
+                <div class="metric-label">Frames/sec</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value" id="metricRtf">—</div>
+                <div class="metric-label">RTF</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value" id="metricFrameMs">—</div>
+                <div class="metric-label">ms/frame</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value" id="metricMimiMs">—</div>
+                <div class="metric-label">Mimi (ms)</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value" id="metricSttMs">—</div>
+                <div class="metric-label">STT (ms)</div>
+            </div>
+        </div>
     </div>
 
     <script type="module">
@@ -199,16 +265,47 @@
         const progressFill = document.getElementById('progressFill');
         const progressInfo = document.getElementById('progressInfo');
         const transcriptEl = document.getElementById('transcript');
+        const transcriptTextEl = document.getElementById('transcriptText');
         const rtfInfoEl = document.getElementById('rtfInfo');
         const recordBtn = document.getElementById('recordBtn');
         const fileBtn = document.getElementById('fileBtn');
         const fileInput = document.getElementById('fileInput');
         const testFileBtns = document.querySelectorAll('.test-file');
         const resetBtn = document.getElementById('resetBtn');
+        const metricsCard = document.getElementById('metricsCard');
+        const metricTtfb = document.getElementById('metricTtfb');
+        const metricFps = document.getElementById('metricFps');
+        const metricRtf = document.getElementById('metricRtf');
+        const metricFrameMs = document.getElementById('metricFrameMs');
+        const metricMimiMs = document.getElementById('metricMimiMs');
+        const metricSttMs = document.getElementById('metricSttMs');
+
+        function updateMetrics(data) {
+            metricsCard.style.display = 'block';
+            if (data.ttfb != null && data.ttfb >= 0) {
+                metricTtfb.textContent = data.ttfb.toFixed(0);
+            }
+            if (data.framesPerSec != null) {
+                metricFps.textContent = data.framesPerSec.toFixed(1);
+            }
+            if (data.rtf != null) {
+                metricRtf.textContent = (typeof data.rtf === 'object' ? data.rtf.total : data.rtf).toFixed(2);
+            }
+            if (data.avgFrameMs != null) {
+                metricFrameMs.textContent = data.avgFrameMs.toFixed(1);
+            }
+            if (data.mimiMs != null) {
+                metricMimiMs.textContent = data.mimiMs.toFixed(1);
+            }
+            if (data.sttMs != null) {
+                metricSttMs.textContent = data.sttMs.toFixed(1);
+            }
+        }
 
         // State
         let client = null;
         let isRecording = false;
+        let isProcessingFile = false;
         let transcriptText = '';
 
         function updateStatus(state, text) {
@@ -234,14 +331,21 @@
             //   tokenizerUrl: 'https://cdn.example.com/stt/models/tokenizer.model',
             client = new SttClient({
                 onStatus: (text, ready, progress) => {
+                    // Ignore stale processing status messages after stop
+                    if (!isRecording && !isProcessingFile && text.startsWith('Processing')) {
+                        return;
+                    }
                     if (ready) {
                         updateStatus('ready', text);
                         recordBtn.disabled = false;
                         fileBtn.disabled = false;
                         testFileBtns.forEach(b => b.disabled = false);
                         resetBtn.disabled = false;
+                        isProcessingFile = false;
                         progressBar.classList.remove('visible');
                         progressInfo.textContent = '';
+                    } else if (isProcessingFile && text.startsWith('Processing')) {
+                        updateStatus('loading', text);
                     } else {
                         updateStatus('loading', text);
 
@@ -257,21 +361,31 @@
                 },
 
                 onTranscript: (text, isFinal, rtf) => {
+                    const cursor = document.getElementById('streamingCursor');
                     if (text) {
-                        if (isFinal) {
-                            transcriptText += text + ' ';
-                        } else {
-                            transcriptText += text;
-                        }
-                        transcriptEl.textContent = transcriptText;
+                        transcriptText += text;
+                        transcriptTextEl.textContent = transcriptText;
                         transcriptEl.classList.remove('empty');
                     }
-                    if (isFinal && rtf) {
-                        const speedup = (1 / rtf.total).toFixed(1);
-                        const faster = rtf.total < 1.0 ? ` — ${speedup}x faster than real-time` : '';
-                        rtfInfoEl.textContent = `RTF: ${rtf.total.toFixed(2)}x (feed: ${rtf.feed.toFixed(2)}x, flush: ${rtf.flush.toFixed(2)}x, audio: ${rtf.audioDuration.toFixed(1)}s)${faster}`;
-                        rtfInfoEl.style.display = 'block';
+
+                    if (isFinal) {
+                        if (transcriptText) transcriptText += ' ';
+                        if (cursor) cursor.style.display = 'none';
+
+                        if (rtf) {
+                            const procTime = (rtf.audioDuration * rtf.total).toFixed(1);
+                            const speedup = (1 / rtf.total).toFixed(1);
+                            const faster = rtf.total < 1.0 ? ` — ${speedup}x faster than real-time` : '';
+                            rtfInfoEl.textContent = `${rtf.audioDuration.toFixed(1)}s audio processed in ${procTime}s (RTF: ${rtf.total.toFixed(2)}x)${faster}`;
+                            rtfInfoEl.style.display = 'block';
+                        }
+                    } else {
+                        if (cursor) cursor.style.display = 'inline-block';
                     }
+                },
+
+                onMetrics: (data) => {
+                    updateMetrics(data);
                 },
 
                 onError: (err) => {
@@ -325,6 +439,7 @@
             fileBtn.disabled = true;
             recordBtn.disabled = true;
             testFileBtns.forEach(b => b.disabled = true);
+            isProcessingFile = true;
 
             try {
                 // Decode to 24kHz mono (Mimi's native rate)
@@ -343,16 +458,16 @@
                 const pcm = rendered.getChannelData(0);
 
                 console.log(`[file] Decoded: ${pcm.length} samples (${(pcm.length/24000).toFixed(1)}s) at 24kHz`);
-                updateStatus('loading', `Feeding ${(pcm.length/24000).toFixed(1)}s of audio...`);
 
                 // Reset state before feeding
                 client.worker.postMessage({ type: 'reset' });
                 transcriptText = '';
-                transcriptEl.textContent = '';
+                transcriptTextEl.textContent = '';
                 transcriptEl.classList.remove('empty');
 
                 // Feed in ~100ms chunks (2400 samples)
                 const CHUNK = 2400;
+                updateStatus('loading', `Processing ${(pcm.length/24000).toFixed(1)}s of audio...`);
                 for (let i = 0; i < pcm.length; i += CHUNK) {
                     const chunk = pcm.slice(i, Math.min(i + CHUNK, pcm.length));
                     client.worker.postMessage(
@@ -365,13 +480,12 @@
                     }
                 }
 
-                // Flush remaining tokens
+                // Flush remaining tokens — "Done" status comes from worker via onStatus('Ready')
                 client.worker.postMessage({ type: 'stop' });
-                updateStatus('ready', `Done — fed ${(pcm.length/24000).toFixed(1)}s from ${label}`);
             } catch (err) {
                 updateStatus('error', 'File error: ' + err.message);
                 console.error(err);
-            } finally {
+                isProcessingFile = false;
                 fileBtn.disabled = false;
                 recordBtn.disabled = false;
                 testFileBtns.forEach(b => b.disabled = false);
@@ -403,10 +517,18 @@
         // Reset button
         resetBtn.addEventListener('click', () => {
             transcriptText = '';
-            transcriptEl.textContent = 'Transcript will appear here as you speak...';
+            transcriptTextEl.textContent = 'Transcript will appear here as you speak...';
             transcriptEl.classList.add('empty');
+            document.getElementById('streamingCursor').style.display = 'none';
             rtfInfoEl.style.display = 'none';
             rtfInfoEl.textContent = '';
+            metricsCard.style.display = 'none';
+            metricTtfb.textContent = '—';
+            metricFps.textContent = '—';
+            metricRtf.textContent = '—';
+            metricFrameMs.textContent = '—';
+            metricMimiMs.textContent = '—';
+            metricSttMs.textContent = '—';
             client.reset();
             updateStatus('ready', 'Ready');
         });

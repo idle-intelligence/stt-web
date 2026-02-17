@@ -21,11 +21,23 @@ import { SpmDecoder } from './tokenizer.js';
 let engine = null;
 let sttWasm = null;
 let tokenizer = null;
-let audioBuffer = [];  // Buffer audio chunks for batch encoding
+let totalSamples = 0;
+let recordingStart = 0;
+
+let lastMetricsSent = 0;    // performance.now() of last metrics message
+const METRICS_INTERVAL_MS = 1000; // send metrics update every ~1s
+
+// State transition logging (not per-frame — only major state changes)
+function logState(msg) {
+    console.log(`[worker] ${msg}`);
+}
 
 // Serialize all engine access to prevent wasm-bindgen "recursive use" errors.
 // The WASM engine uses &mut self, so only one call can be active at a time.
 let busy = false;
+let stopped = false; // Set when 'stop' received — skip remaining queued audio
+let audioChunkCount = 0; // Track chunks received per session
+let tokenCount = 0;      // Track text tokens produced per session
 const msgQueue = [];
 
 async function drainQueue() {
@@ -34,17 +46,28 @@ async function drainQueue() {
     while (msgQueue.length > 0) {
         const { type, data } = msgQueue.shift();
         try {
+            // Skip queued audio after stop was requested
+            if (type === 'audio' && stopped) {
+                continue;
+            }
             switch (type) {
                 case 'load':
+                    logState('Loading model...');
                     await handleLoad(data.config || {});
                     break;
                 case 'audio':
                     await handleAudio(data);
                     break;
                 case 'stop':
+                    logState(`Stop received (${audioChunkCount} chunks, ${tokenCount} tokens produced)`);
+                    stopped = true;
                     await handleStop();
                     break;
                 case 'reset':
+                    logState('Reset — starting new session');
+                    stopped = false;
+                    audioChunkCount = 0;
+                    tokenCount = 0;
                     handleReset();
                     break;
                 default:
@@ -204,81 +227,127 @@ async function handleLoad(config) {
     }
 
     // 9. Signal ready.
+    logState('Model loaded, ready to receive audio');
     self.postMessage({ type: 'status', text: 'Ready', ready: true });
 }
 
 async function handleAudio({ samples }) {
     if (!engine || !tokenizer) return;
 
-    // Buffer audio chunks — they'll be batch-encoded on stop.
     const audioData = samples instanceof Float32Array
         ? samples
         : new Float32Array(samples);
 
-    audioBuffer.push(audioData);
+    if (totalSamples === 0) {
+        recordingStart = performance.now();
+        lastMetricsSent = performance.now();
+        logState('Receiving audio...');
+    }
+    totalSamples += audioData.length;
+    audioChunkCount++;
 
-    const totalSamples = audioBuffer.reduce((s, c) => s + c.length, 0);
-    const duration = (totalSamples / 24000).toFixed(1);
-    self.postMessage({ type: 'status', text: `Recording... ${duration}s` });
+    // Process chunk immediately (streaming encode)
+    const tokenIds = await engine.feedAudio(audioData);
+    const ids = tokenIds ? Array.from(tokenIds) : [];
+
+    if (ids.length > 0) {
+        tokenCount += ids.length;
+        const text = tokenizer.decode(ids);
+        // Log first few tokens and any non-empty text for debugging
+        if (tokenCount <= 15 || text) {
+            logState(`Tokens [${ids.join(',')}] → "${text}" (chunk #${audioChunkCount}, total tokens: ${tokenCount})`);
+        }
+        if (text) {
+            self.postMessage({ type: 'transcript', text, final: false });
+        }
+    }
+
+    const now = performance.now();
+    if (now - lastMetricsSent >= METRICS_INTERVAL_MS) {
+        lastMetricsSent = now;
+        const m = engine.getMetrics();
+        const audioDuration = totalSamples / 24000;
+        const elapsed = (now - recordingStart) / 1000;
+        self.postMessage({
+            type: 'metrics',
+            ttfb: m.ttfb_ms >= 0 ? m.ttfb_ms : null,
+            framesPerSec: m.total_frames > 0 ? m.total_frames / elapsed : 0,
+            avgFrameMs: m.total_frames > 0 ? m.total_ms / m.total_frames : 0,
+            mimiMs: m.total_frames > 0 ? m.mimi_encode_ms / m.total_frames : 0,
+            sttMs: m.total_frames > 0 ? m.stt_forward_ms / m.total_frames : 0,
+            rtf: elapsed / audioDuration,
+            audioDuration,
+        });
+    }
+
+    const audioDur = (totalSamples / 24000).toFixed(1);
+    const elapsed = ((performance.now() - recordingStart) / 1000).toFixed(1);
+    self.postMessage({ type: 'status', text: `Processing... ${audioDur}s audio (${elapsed}s elapsed)` });
 }
 
 async function handleStop() {
     if (!engine || !tokenizer) return;
 
-    // Concatenate all buffered audio into a single Float32Array.
-    const totalSamples = audioBuffer.reduce((s, c) => s + c.length, 0);
     if (totalSamples === 0) {
+        logState('Stop: no audio received');
         self.postMessage({ type: 'transcript', text: '', final: true });
         return;
     }
 
-    const allAudio = new Float32Array(totalSamples);
-    let offset = 0;
-    for (const chunk of audioBuffer) {
-        allAudio.set(chunk, offset);
-        offset += chunk.length;
-    }
-    audioBuffer = [];
-
-    const audioDuration = totalSamples / 24000;
-    self.postMessage({ type: 'status', text: `Transcribing ${audioDuration.toFixed(1)}s of audio...` });
-    console.log(`[worker] Batch encoding ${totalSamples} samples (${audioDuration.toFixed(1)}s)`);
-
-    // Batch encode + STT in one call
-    const t0 = performance.now();
-    const tokenIds = await engine.feedAudio(allAudio);
-    const t1 = performance.now();
-    const ids = tokenIds ? Array.from(tokenIds) : [];
-    console.log('[worker] feedAudio →', ids.length, 'tokens');
+    logState(`Flushing (${totalSamples} samples = ${(totalSamples/24000).toFixed(1)}s, ${tokenCount} tokens so far)...`);
 
     // Flush remaining delayed tokens
     const flushIds = await engine.flush();
-    const t2 = performance.now();
     const fids = flushIds ? Array.from(flushIds) : [];
-    console.log('[worker] flush →', fids.length, 'tokens');
 
-    const feedTime = (t1 - t0) / 1000;
-    const flushTime = (t2 - t1) / 1000;
-    const totalTime = (t2 - t0) / 1000;
+    if (fids.length > 0) {
+        logState(`Flush produced ${fids.length} tokens: [${fids.join(',')}]`);
+        const text = tokenizer.decode(fids);
+        if (text) {
+            self.postMessage({ type: 'transcript', text, final: false });
+        } else {
+            logState('Flush tokens decoded to empty string (all special?)');
+        }
+    } else {
+        logState('Flush returned 0 tokens');
+    }
+
+    // Calculate final RTF and send Rust-side metrics
+    const audioDuration = totalSamples / 24000;
+    const totalTime = (performance.now() - recordingStart) / 1000;
     const rtf = {
         total: totalTime / audioDuration,
-        feed: feedTime / audioDuration,
-        flush: flushTime / audioDuration,
         audioDuration,
     };
-    console.log(`[worker] RTF: total=${rtf.total.toFixed(3)} feed=${rtf.feed.toFixed(3)} flush=${rtf.flush.toFixed(3)}`);
 
-    const allIds = ids.concat(fids);
-    const text = allIds.length > 0 ? tokenizer.decode(allIds) : '';
+    const m = engine.getMetrics();
+    const avgMimiMs = m.total_frames > 0 ? m.mimi_encode_ms / m.total_frames : 0;
+    const avgSttMs = m.total_frames > 0 ? m.stt_forward_ms / m.total_frames : 0;
+    logState(`Done: ${audioDuration.toFixed(1)}s audio, ${audioChunkCount} chunks, ${m.total_frames} frames, ${tokenCount} tokens, RTF=${rtf.total.toFixed(3)}, avg Mimi=${avgMimiMs.toFixed(1)}ms avg STT=${avgSttMs.toFixed(1)}ms`);
 
-    self.postMessage({ type: 'transcript', text, final: true, rtf });
-    self.postMessage({ type: 'status', text: 'Ready' });
+    // Send final metrics
+    self.postMessage({
+        type: 'metrics',
+        ttfb: m.ttfb_ms >= 0 ? m.ttfb_ms : null,
+        framesPerSec: m.total_frames > 0 ? m.total_frames / totalTime : 0,
+        avgFrameMs: m.total_frames > 0 ? m.total_ms / m.total_frames : 0,
+        mimiMs: avgMimiMs,
+        sttMs: avgSttMs,
+        rtf: rtf.total,
+        audioDuration,
+        final: true,
+    });
+
+    self.postMessage({ type: 'transcript', text: '', final: true, rtf });
+    totalSamples = 0;
+    self.postMessage({ type: 'status', text: 'Ready', ready: true });
 }
 
 function handleReset() {
-    audioBuffer = [];
-    if (!engine) {
-        return;
-    }
+    totalSamples = 0;
+    lastMetricsSent = 0;
+    audioChunkCount = 0;
+    tokenCount = 0;
+    if (!engine) return;
     engine.reset();
 }

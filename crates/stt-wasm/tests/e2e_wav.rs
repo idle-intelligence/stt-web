@@ -345,3 +345,240 @@ fn test_e2e_wav_bria() {
         println!("\n=== E2E WAV BRIA TEST PASSED ===");
     });
 }
+
+/// Streaming E2E test: simulates the browser pipeline.
+///
+/// Uses streaming Mimi (feed_audio with small chunks) + streaming STT,
+/// exactly as the browser's SttEngine.feedAudio() does.
+#[test]
+fn test_e2e_streaming() {
+    pollster::block_on(async {
+        let wav_path = std::path::Path::new("../../web/test-loona.wav");
+        let mimi_weights_path = "../../models/mimi.safetensors";
+        let gguf_path = std::path::Path::new("../../models/stt-1b-en_fr-q4.gguf");
+        let tokenizer_path = std::path::Path::new("../../models/tokenizer.model");
+
+        if !gguf_path.exists() || !std::path::Path::new(mimi_weights_path).exists() {
+            println!("Skipping: model files not found");
+            return;
+        }
+
+        // === Read WAV ===
+        println!("=== Streaming E2E: Reading WAV ===");
+        let reader = hound::WavReader::open(wav_path).expect("Failed to open WAV");
+        let spec = reader.spec();
+        let samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Float => {
+                reader.into_samples::<f32>().map(|s| s.unwrap()).collect()
+            }
+            hound::SampleFormat::Int => {
+                let bits = spec.bits_per_sample;
+                let max_val = (1 << (bits - 1)) as f32;
+                reader.into_samples::<i32>().map(|s| s.unwrap() as f32 / max_val).collect()
+            }
+        };
+        let duration_s = samples.len() as f64 / spec.sample_rate as f64;
+        println!("Audio: {:.2}s, {} samples at {}Hz", duration_s, samples.len(), spec.sample_rate);
+
+        // === Load Mimi (streaming mode) ===
+        println!("\n=== Loading Mimi (streaming) ===");
+        let mut mimi = mimi_wasm::MimiCodec::new(mimi_weights_path).await
+            .expect("Failed to create Mimi codec");
+
+        // === Load STT model ===
+        println!("Loading STT model...");
+        let vocab = load_sentencepiece_vocab(tokenizer_path);
+        let device = device();
+        let config = SttConfig::default();
+
+        let file_data = std::fs::read(gguf_path).unwrap();
+        let mut loader = Q4ModelLoader::from_shards(vec![file_data]).unwrap();
+        let parts = loader.load_deferred(&device, &config).unwrap();
+        drop(loader);
+        let model = parts.finalize(&device).unwrap();
+        let mut stream = SttStream::new(config.clone(), config.num_layers);
+
+        // === Stream audio in browser-sized chunks ===
+        // Browser AudioWorklet sends 1920 samples (80ms at 24kHz)
+        // File upload uses 2400 samples (100ms at 24kHz)
+        let chunk_size = 2400;
+        let mut all_tokens: Vec<u32> = Vec::new();
+        let mut chunk_count = 0;
+        let num_codebooks = config.num_codebooks;
+
+        println!("\n=== Streaming audio in {}‐sample chunks ===", chunk_size);
+        let start = std::time::Instant::now();
+
+        for chunk_start in (0..samples.len()).step_by(chunk_size) {
+            let chunk_end = (chunk_start + chunk_size).min(samples.len());
+            let chunk = &samples[chunk_start..chunk_end];
+            chunk_count += 1;
+
+            // Streaming Mimi encode (exactly what browser does)
+            let tokens = mimi.feed_audio(chunk);
+            let mimi_frames = tokens.len() / num_codebooks;
+
+            // Streaming STT forward for each Mimi frame
+            for frame_start in (0..tokens.len()).step_by(num_codebooks) {
+                if frame_start + num_codebooks > tokens.len() {
+                    break;
+                }
+                let frame = &tokens[frame_start..frame_start + num_codebooks];
+                if let Some(token) = stream.feed_frame(frame, &model).await {
+                    all_tokens.push(token);
+                }
+            }
+
+            if chunk_count <= 3 || mimi_frames > 0 {
+                println!("  Chunk {}: {} samples → {} Mimi frames, {} text tokens total",
+                    chunk_count, chunk.len(), mimi_frames, all_tokens.len());
+            }
+        }
+
+        // === Flush remaining ===
+        println!("\n=== Flushing delayed tokens ===");
+        let flush_tokens = stream.flush(&model).await;
+        println!("Flush produced {} tokens", flush_tokens.len());
+        all_tokens.extend(&flush_tokens);
+
+        let elapsed = start.elapsed().as_secs_f64();
+        let rtf = elapsed / duration_s;
+        println!("Total RTF: {:.3}x ({:.3}s processing / {:.2}s audio)", rtf, elapsed, duration_s);
+
+        // === Decode ===
+        let non_special: Vec<u32> = all_tokens.iter()
+            .copied()
+            .filter(|&t| t != 0 && t != 3)
+            .collect();
+        println!("\nTotal tokens: {} (non-special: {})", all_tokens.len(), non_special.len());
+        println!("All token IDs: {:?}", all_tokens);
+        println!("Non-special IDs: {:?}", non_special);
+
+        let transcript = decode_tokens(&vocab, &all_tokens);
+        println!("\n========================================");
+        println!("STREAMING TRANSCRIPT: {}", transcript);
+        println!("========================================");
+
+        assert!(!transcript.is_empty(), "Streaming transcript should not be empty");
+        println!("\n=== STREAMING E2E TEST PASSED ===");
+    });
+}
+
+/// Streaming E2E test with longer audio (test-bria.wav, ~30s).
+///
+/// Uses streaming Mimi (feed_audio with 2400-sample chunks) + streaming STT,
+/// exactly as the browser's SttEngine.feedAudio() does for file upload.
+#[test]
+fn test_e2e_streaming_bria() {
+    pollster::block_on(async {
+        let wav_path = std::path::Path::new("../../web/test-bria.wav");
+        let mimi_weights_path = "../../models/mimi.safetensors";
+        let gguf_path = std::path::Path::new("../../models/stt-1b-en_fr-q4.gguf");
+        let tokenizer_path = std::path::Path::new("../../models/tokenizer.model");
+
+        if !gguf_path.exists() || !std::path::Path::new(mimi_weights_path).exists() {
+            println!("Skipping: model files not found");
+            return;
+        }
+
+        // === Read WAV ===
+        println!("=== Streaming E2E (bria): Reading WAV ===");
+        let reader = hound::WavReader::open(wav_path).expect("Failed to open WAV");
+        let spec = reader.spec();
+        let samples: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Float => {
+                reader.into_samples::<f32>().map(|s| s.unwrap()).collect()
+            }
+            hound::SampleFormat::Int => {
+                let bits = spec.bits_per_sample;
+                let max_val = (1 << (bits - 1)) as f32;
+                reader.into_samples::<i32>().map(|s| s.unwrap() as f32 / max_val).collect()
+            }
+        };
+        let duration_s = samples.len() as f64 / spec.sample_rate as f64;
+        println!("Audio: {:.2}s, {} samples at {}Hz", duration_s, samples.len(), spec.sample_rate);
+
+        // === Load Mimi (streaming mode) ===
+        println!("\n=== Loading Mimi (streaming) ===");
+        let mut mimi = mimi_wasm::MimiCodec::new(mimi_weights_path).await
+            .expect("Failed to create Mimi codec");
+
+        // === Load STT model ===
+        println!("Loading STT model...");
+        let vocab = load_sentencepiece_vocab(tokenizer_path);
+        let device = device();
+        let config = SttConfig::default();
+
+        let file_data = std::fs::read(gguf_path).unwrap();
+        let mut loader = Q4ModelLoader::from_shards(vec![file_data]).unwrap();
+        let parts = loader.load_deferred(&device, &config).unwrap();
+        drop(loader);
+        let model = parts.finalize(&device).unwrap();
+        let mut stream = SttStream::new(config.clone(), config.num_layers);
+
+        // === Stream audio in browser-sized chunks ===
+        let chunk_size = 2400; // 100ms at 24kHz (file upload mode)
+        let mut all_tokens: Vec<u32> = Vec::new();
+        let mut chunk_count = 0;
+        let mut total_frames = 0;
+        let num_codebooks = config.num_codebooks;
+
+        println!("\n=== Streaming audio in {}‐sample chunks ===", chunk_size);
+        let start = std::time::Instant::now();
+
+        for chunk_start in (0..samples.len()).step_by(chunk_size) {
+            let chunk_end = (chunk_start + chunk_size).min(samples.len());
+            let chunk = &samples[chunk_start..chunk_end];
+            chunk_count += 1;
+
+            // Streaming Mimi encode
+            let tokens = mimi.feed_audio(chunk);
+            // Streaming STT forward for each Mimi frame
+            for frame_start in (0..tokens.len()).step_by(num_codebooks) {
+                if frame_start + num_codebooks > tokens.len() {
+                    break;
+                }
+                let frame = &tokens[frame_start..frame_start + num_codebooks];
+                total_frames += 1;
+                if let Some(token) = stream.feed_frame(frame, &model).await {
+                    all_tokens.push(token);
+                }
+
+                // Progress every 50 frames
+                if total_frames % 50 == 0 {
+                    let partial = decode_tokens(&vocab, &all_tokens);
+                    println!("  [frame {}, chunk {}] {} text tokens so far: \"{}\"",
+                        total_frames, chunk_count, all_tokens.len(),
+                        if partial.len() > 80 { format!("...{}", &partial[partial.len()-80..]) } else { partial });
+                }
+            }
+        }
+
+        // === Flush remaining ===
+        println!("\n=== Flushing delayed tokens ===");
+        let flush_tokens = stream.flush(&model).await;
+        println!("Flush produced {} tokens", flush_tokens.len());
+        all_tokens.extend(&flush_tokens);
+
+        let elapsed = start.elapsed().as_secs_f64();
+        let rtf = elapsed / duration_s;
+        println!("Total: {} frames from {} chunks, RTF: {:.3}x ({:.3}s / {:.2}s audio)",
+            total_frames, chunk_count, rtf, elapsed, duration_s);
+
+        // === Decode ===
+        let non_special: Vec<u32> = all_tokens.iter()
+            .copied()
+            .filter(|&t| t != 0 && t != 3)
+            .collect();
+        println!("\nTotal tokens: {} (non-special: {})", all_tokens.len(), non_special.len());
+
+        let transcript = decode_tokens(&vocab, &all_tokens);
+        println!("\n========================================");
+        println!("STREAMING TRANSCRIPT (bria, {:.1}s):", duration_s);
+        println!("{}", transcript);
+        println!("========================================");
+
+        assert!(!transcript.is_empty(), "Streaming transcript should not be empty");
+        println!("\n=== STREAMING E2E BRIA TEST PASSED ===");
+    });
+}

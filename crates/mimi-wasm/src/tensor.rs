@@ -73,19 +73,27 @@ impl Tensor3 {
     }
 
     /// Slice along the time dimension.
+    /// Always returns a contiguous (standard layout) array.
     pub fn slice_time(&self, start: usize, len: usize) -> Self {
         let sliced = self
             .data
-            .slice_axis(Axis(2), ndarray::Slice::from(start..start + len))
-            .to_owned();
-        Self { data: sliced }
+            .slice_axis(Axis(2), ndarray::Slice::from(start..start + len));
+        // as_standard_layout + to_owned ensures C-contiguous memory
+        let data = sliced.as_standard_layout().to_owned();
+        Self { data }
     }
 
     /// Concatenate along the time axis.
+    /// Always returns a contiguous (standard layout) array.
     pub fn concat_time(tensors: &[&Self]) -> Self {
         let views: Vec<_> = tensors.iter().map(|t| t.data.view()).collect();
         let data = ndarray::concatenate(Axis(2), &views).expect("concat failed");
-        Self { data }
+        // Ensure contiguous layout
+        if data.is_standard_layout() {
+            Self { data }
+        } else {
+            Self { data: data.as_standard_layout().to_owned() }
+        }
     }
 
     /// Multiply each channel by a per-channel scale vector (in-place).

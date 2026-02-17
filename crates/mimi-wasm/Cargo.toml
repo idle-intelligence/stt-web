@@ -33,6 +33,10 @@ num-traits = "0.2"
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
-web-sys = { workspace = true, optional = true, features = ["Window", "Response", "Request", "RequestInit", "RequestMode"] }
+web-sys = { workspace = true, optional = true, features = ["Window", "Response", "Request", "RequestInit", "RequestMode", "console"] }
 console_error_panic_hook = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
+
+[dev-dependencies]
+hound = { workspace = true }
+pollster = "0.4"

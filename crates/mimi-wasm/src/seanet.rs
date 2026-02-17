@@ -35,6 +35,45 @@ impl ResidualBlock {
         }
     }
 
+    /// Streaming step: ELU → conv1.step → ELU → conv2.step + shortcut.
+    pub fn step(&mut self, x: &Tensor3) -> Option<Tensor3> {
+        let residual = x.elu(1.0);
+        let residual = self.conv1.step(&residual)?;
+        let residual = residual.elu(1.0);
+        let mut residual = self.conv2.step(&residual)?;
+
+        match &mut self.shortcut {
+            Some(shortcut) => {
+                let sc = shortcut.step(x)?;
+                residual.add_assign(&sc);
+                Some(residual)
+            }
+            None => {
+                // For no-shortcut case, the residual path through conv1+conv2
+                // (both stride=1 causal) will buffer on the first call(s) and
+                // then produce output time == input time in steady state.
+                // We need to align x with the output by taking the last N samples.
+                let (_, _, res_time) = residual.shape();
+                let (_, _, x_time) = x.shape();
+                if res_time == x_time {
+                    residual.add_assign(x);
+                } else if res_time < x_time {
+                    let trimmed = x.slice_time(x_time - res_time, res_time);
+                    residual.add_assign(&trimmed);
+                }
+                Some(residual)
+            }
+        }
+    }
+
+    pub fn init_streaming(&mut self) {
+        self.conv1.init_streaming();
+        self.conv2.init_streaming();
+        if let Some(ref mut s) = self.shortcut {
+            s.init_streaming();
+        }
+    }
+
     pub fn reset(&mut self) {
         self.conv1.reset();
         self.conv2.reset();
@@ -67,6 +106,28 @@ impl EncoderLayer {
         // ELU before downsample
         x.elu_inplace(1.0);
         self.downsample.forward(&x)
+    }
+
+    /// Streaming step: residual blocks → ELU → downsample.step().
+    pub fn step(&mut self, x: &Tensor3) -> Option<Tensor3> {
+        let mut x_owned = if self.residual_blocks.is_empty() {
+            x.clone()
+        } else {
+            let mut result = self.residual_blocks[0].step(x)?;
+            for block in &mut self.residual_blocks[1..] {
+                result = block.step(&result)?;
+            }
+            result
+        };
+        x_owned.elu_inplace(1.0);
+        self.downsample.step(&x_owned)
+    }
+
+    pub fn init_streaming(&mut self) {
+        for block in &mut self.residual_blocks {
+            block.init_streaming();
+        }
+        self.downsample.init_streaming();
     }
 
     pub fn reset(&mut self) {
@@ -105,6 +166,26 @@ impl SeaNetEncoder {
         // ELU before final convolution
         x.elu_inplace(1.0);
         self.final_conv.forward(&x)
+    }
+
+    /// Streaming step: init_conv.step → ELU → layers.step → ELU → final_conv.step.
+    pub fn step(&mut self, x: &Tensor3) -> Option<Tensor3> {
+        let mut x = self.init_conv.step(x)?;
+        x.elu_inplace(1.0);
+        for layer in &mut self.layers {
+            x = layer.step(&x)?;
+        }
+        x.elu_inplace(1.0);
+        self.final_conv.step(&x)
+    }
+
+    /// Initialize all convolution buffers for streaming with batch_size=1.
+    pub fn init_streaming(&mut self) {
+        self.init_conv.init_streaming();
+        for layer in &mut self.layers {
+            layer.init_streaming();
+        }
+        self.final_conv.init_streaming();
     }
 
     pub fn reset(&mut self) {

@@ -122,7 +122,7 @@ impl MimiCodec {
 
         let samples_per_frame = (config.sample_rate as f64 / config.frame_rate) as usize;
 
-        Ok(MimiCodec {
+        let mut codec = MimiCodec {
             config,
             encoder,
             encoder_transformer,
@@ -130,7 +130,9 @@ impl MimiCodec {
             quantizer,
             audio_buffer: Vec::new(),
             samples_per_frame,
-        })
+        };
+        codec.init_streaming();
+        Ok(codec)
     }
 
     #[cfg(feature = "wasm")]
@@ -473,63 +475,110 @@ impl MimiCodec {
         Ok(codebook)
     }
 
-    /// Feed audio samples and return tokens when a full frame is ready.
-    pub fn feed_audio(&mut self, samples: &[f32]) -> Vec<u32> {
-        // Accumulate samples
-        self.audio_buffer.extend_from_slice(samples);
-
-        let mut all_tokens = Vec::new();
-
-        // Process complete frames
-        while self.audio_buffer.len() >= self.samples_per_frame {
-            // Extract one frame worth of audio
-            let frame_samples: Vec<f32> =
-                self.audio_buffer.drain(..self.samples_per_frame).collect();
-
-            // Encode frame
-            match self.encode_frame(&frame_samples) {
-                Ok(tokens) => {
-                    all_tokens.extend(tokens);
-                }
-                Err(_) => {
-                    // For now, return zeros on error (placeholder)
-                    all_tokens.extend(vec![0u32; self.config.num_codebooks]);
-                }
-            }
-        }
-
-        all_tokens
+    /// Initialize streaming state for all encoder components.
+    fn init_streaming(&mut self) {
+        self.encoder.init_streaming();
+        self.downsample.init_streaming();
+        // Transformer streaming is initialized via reset (position=0, empty KV cache)
     }
 
-    /// Encode a single frame of audio into 32 tokens.
-    fn encode_frame(&mut self, samples: &[f32]) -> Result<Vec<u32>, MimiError> {
-        // Reshape to (batch=1, channels=1, time)
+    /// Feed audio samples and return tokens using streaming encode.
+    ///
+    /// The streaming convolutions buffer internally, so any chunk size works.
+    /// Returns token IDs as a flat array: `[frame0_tok0..tok31, frame1_tok0..tok31, ...]`
+    /// May return empty if not enough audio has accumulated.
+    pub fn feed_audio(&mut self, samples: &[f32]) -> Vec<u32> {
+        if samples.is_empty() {
+            return Vec::new();
+        }
+
+        // Build input tensor: (batch=1, channels=1, time)
         let time = samples.len();
         let mut data = Array3::<f32>::zeros((1, 1, time));
-        for (i, &sample) in samples.iter().enumerate() {
-            data[[0, 0, i]] = sample;
-        }
+        let data_slice = data.as_slice_mut().unwrap();
+        data_slice[..time].copy_from_slice(samples);
         let input = Tensor3::new(data);
 
-        // SEANet encoder
-        let encoded = self.encoder.forward(&input);
+        // Stream through SEANet encoder (handles buffering internally)
+        let encoded = match self.encoder.step(&input) {
+            Some(e) => e,
+            None => return Vec::new(),
+        };
 
-        // Encoder transformer
-        let transformed = self.encoder_transformer.forward(&encoded);
+        // Stream through encoder transformer (with KV cache)
+        let transformed = self.encoder_transformer.step(&encoded);
 
-        // Downsample
-        let downsampled = self.downsample.forward(&transformed);
+        // Stream through downsample conv
+        let downsampled = match self.downsample.step(&transformed) {
+            Some(d) => d,
+            None => return Vec::new(),
+        };
 
         // Quantize to tokens
         let codes = self.quantizer.encode(&downsampled);
 
-        // Extract tokens for batch 0, frame 0 (all 32 codebooks)
-        let mut tokens = Vec::with_capacity(self.config.num_codebooks);
-        for q in 0..self.config.num_codebooks {
-            tokens.push(codes[[0, q, 0]]);
+        // Extract all frames' tokens
+        let num_frames = codes.shape()[2];
+        let mut all_tokens = Vec::with_capacity(num_frames * self.config.num_codebooks);
+        for f in 0..num_frames {
+            for q in 0..self.config.num_codebooks {
+                all_tokens.push(codes[[0, q, f]]);
+            }
+        }
+        all_tokens
+    }
+
+    /// Profiled version of feed_audio that returns per-stage timings.
+    #[cfg(not(feature = "wasm"))]
+    pub fn feed_audio_profiled(&mut self, samples: &[f32]) -> (Vec<u32>, Option<(f64, f64, f64, f64, (usize, usize, usize), usize)>) {
+        use std::time::Instant;
+
+        if samples.is_empty() {
+            return (Vec::new(), None);
         }
 
-        Ok(tokens)
+        let time = samples.len();
+        let mut data = Array3::<f32>::zeros((1, 1, time));
+        data.as_slice_mut().unwrap()[..time].copy_from_slice(samples);
+        let input = Tensor3::new(data);
+
+        let t0 = Instant::now();
+        let encoded = match self.encoder.step(&input) {
+            Some(e) => e,
+            None => {
+                let enc_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                return (Vec::new(), Some((enc_ms, 0.0, 0.0, 0.0, (0, 0, 0), 0)));
+            }
+        };
+        let enc_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let enc_shape = encoded.shape();
+
+        let t1 = Instant::now();
+        let transformed = self.encoder_transformer.step(&encoded);
+        let xfm_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        let t2 = Instant::now();
+        let downsampled = match self.downsample.step(&transformed) {
+            Some(d) => d,
+            None => {
+                let ds_ms = t2.elapsed().as_secs_f64() * 1000.0;
+                return (Vec::new(), Some((enc_ms, xfm_ms, ds_ms, 0.0, enc_shape, 0)));
+            }
+        };
+        let ds_ms = t2.elapsed().as_secs_f64() * 1000.0;
+
+        let t3 = Instant::now();
+        let codes = self.quantizer.encode(&downsampled);
+        let q_ms = t3.elapsed().as_secs_f64() * 1000.0;
+
+        let num_frames = codes.shape()[2];
+        let mut all_tokens = Vec::with_capacity(num_frames * self.config.num_codebooks);
+        for f in 0..num_frames {
+            for q in 0..self.config.num_codebooks {
+                all_tokens.push(codes[[0, q, f]]);
+            }
+        }
+        (all_tokens, Some((enc_ms, xfm_ms, ds_ms, q_ms, enc_shape, num_frames)))
     }
 
     /// Encode an entire waveform at once (batch mode).
@@ -565,6 +614,8 @@ impl MimiCodec {
         self.audio_buffer.clear();
         self.encoder.reset();
         self.encoder_transformer.reset();
+        self.downsample.reset();
+        self.init_streaming();
     }
 }
 

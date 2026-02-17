@@ -84,7 +84,7 @@ export class SpmDecoder {
         // Join pieces and convert SentencePiece underscores to spaces
         let text = pieces.join('');
         text = text.replace(/▁/g, ' '); // U+2581 -> space
-        return text.trim();
+        return text;
     }
 
     /**

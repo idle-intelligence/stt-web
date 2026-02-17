@@ -25,6 +25,70 @@ fn wasm_log(msg: &str) {
     let _ = msg;
 }
 
+/// Cross-platform millisecond timer.
+fn now_ms() -> f64 {
+    #[cfg(target_family = "wasm")]
+    {
+        js_sys::Date::now()
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
+            * 1000.0
+    }
+}
+
+/// Cumulative metrics tracked across the session.
+struct SessionMetrics {
+    first_audio_ms: f64,
+    first_token_ms: f64,
+    has_audio: bool,
+    has_token: bool,
+    total_frames: usize,
+    total_tokens: usize,
+    // Cumulative timing
+    total_mimi_ms: f64,
+    total_stt_ms: f64,
+    total_ms: f64,
+    // Last call values (for debugging)
+    last_mimi_ms: f64,
+    last_stt_ms: f64,
+}
+
+impl SessionMetrics {
+    fn new() -> Self {
+        Self {
+            first_audio_ms: 0.0,
+            first_token_ms: 0.0,
+            has_audio: false,
+            has_token: false,
+            total_frames: 0,
+            total_tokens: 0,
+            total_mimi_ms: 0.0,
+            total_stt_ms: 0.0,
+            total_ms: 0.0,
+            last_mimi_ms: 0.0,
+            last_stt_ms: 0.0,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn ttfb_ms(&self) -> f64 {
+        if self.has_token && self.has_audio {
+            self.first_token_ms - self.first_audio_ms
+        } else {
+            -1.0
+        }
+    }
+}
+
 /// Initialize panic hook for better error messages in browser console.
 #[cfg_attr(target_family = "wasm", wasm_bindgen(start))]
 pub fn start() {
@@ -106,6 +170,7 @@ pub struct SttEngine {
     config: SttConfig,
     device: WgpuDevice,
     shard_bufs: Vec<Vec<u8>>,
+    metrics: SessionMetrics,
 }
 
 #[cfg_attr(target_family = "wasm", wasm_bindgen)]
@@ -127,6 +192,7 @@ impl SttEngine {
             config: SttConfig::default(),
             device,
             shard_bufs: Vec::new(),
+            metrics: SessionMetrics::new(),
         }
     }
 
@@ -195,8 +261,17 @@ impl SttEngine {
     ///
     /// Returns transcript text tokens if any new tokens were produced.
     /// Audio goes through: Mimi codec → STT transformer → text tokens.
+    /// Per-call timing is stored in metrics (retrieve via `getMetrics()`).
     #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = feedAudio))]
     pub async fn feed_audio(&mut self, samples: &[f32]) -> Result<Vec<u32>, JsError> {
+        let t_start = now_ms();
+
+        // Track first audio arrival for TTFB
+        if !self.metrics.has_audio && !samples.is_empty() {
+            self.metrics.has_audio = true;
+            self.metrics.first_audio_ms = t_start;
+        }
+
         let mimi = self
             .mimi
             .as_mut()
@@ -210,23 +285,32 @@ impl SttEngine {
             .as_mut()
             .ok_or_else(|| JsError::new("Stream not initialized."))?;
 
-        // Encode audio to Mimi tokens (batch mode — processes all at once)
-        let tokens = mimi.encode_all(samples);
+        // --- Mimi encode ---
+        let t_mimi_start = now_ms();
+        let tokens = mimi.feed_audio(samples);
+        let t_mimi_end = now_ms();
 
-        if !tokens.is_empty() {
-            let preview: Vec<u32> = tokens.iter().take(32).copied().collect();
+        // --- STT forward ---
+        let num_codebooks = self.config.num_codebooks;
+        let mut text_tokens = Vec::new();
+        let mimi_frames = tokens.len() / num_codebooks;
+
+        // Log first Mimi frame tokens for debugging
+        if mimi_frames > 0 && self.metrics.total_frames == 0 {
+            let first_frame = &tokens[..num_codebooks.min(tokens.len())];
             wasm_log(&format!(
-                "[stt] Mimi: {} samples → {} tokens, first frame: {:?}",
-                samples.len(),
-                tokens.len(),
-                preview
+                "[stt] First Mimi frame ({} tokens): {:?}",
+                first_frame.len(), first_frame
+            ));
+        } else if mimi_frames > 0 && self.metrics.total_frames < 5 {
+            let first_frame = &tokens[..num_codebooks.min(tokens.len())];
+            wasm_log(&format!(
+                "[stt] Mimi frame #{} tokens: {:?}",
+                self.metrics.total_frames + 1, first_frame
             ));
         }
 
-        // Process complete frames (32 tokens per frame)
-        let num_codebooks = self.config.num_codebooks;
-        let mut text_tokens = Vec::new();
-
+        let t_stt_start = now_ms();
         for frame_start in (0..tokens.len()).step_by(num_codebooks) {
             if frame_start + num_codebooks > tokens.len() {
                 break;
@@ -234,11 +318,55 @@ impl SttEngine {
             let frame = &tokens[frame_start..frame_start + num_codebooks];
 
             if let Some(token) = stream.feed_frame(frame, model).await {
+                // Track TTFB: first real text token (not padding=3, not EOS=0)
+                if !self.metrics.has_token
+                    && token != self.config.text_padding_id
+                    && token != 0
+                {
+                    self.metrics.has_token = true;
+                    self.metrics.first_token_ms = now_ms();
+                }
                 text_tokens.push(token);
             }
         }
+        let t_stt_end = now_ms();
+        let t_end = now_ms();
+
+        // Update metrics
+        let mimi_ms = t_mimi_end - t_mimi_start;
+        let stt_ms = t_stt_end - t_stt_start;
+        let total_call_ms = t_end - t_start;
+        self.metrics.total_frames += mimi_frames;
+        self.metrics.total_tokens += text_tokens.len();
+        self.metrics.total_mimi_ms += mimi_ms;
+        self.metrics.total_stt_ms += stt_ms;
+        self.metrics.total_ms += total_call_ms;
+        self.metrics.last_mimi_ms = mimi_ms;
+        self.metrics.last_stt_ms = stt_ms;
 
         Ok(text_tokens)
+    }
+
+    /// Get timing metrics from the last feedAudio call and session-level stats.
+    ///
+    /// Returns a JS object: `{ mimi_encode_ms, stt_forward_ms, total_ms,
+    ///   mimi_frames, stt_tokens, ttfb_ms, total_frames }`
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = getMetrics))]
+    pub fn get_metrics(&self) -> JsValue {
+        let obj = js_sys::Object::new();
+        let set = |k: &str, v: f64| {
+            js_sys::Reflect::set(&obj, &JsValue::from_str(k), &JsValue::from_f64(v)).ok();
+        };
+        set("mimi_encode_ms", self.metrics.total_mimi_ms);
+        set("stt_forward_ms", self.metrics.total_stt_ms);
+        set("total_ms", self.metrics.total_ms);
+        set("total_frames", self.metrics.total_frames as f64);
+        set("total_tokens", self.metrics.total_tokens as f64);
+        set("ttfb_ms", self.metrics.ttfb_ms());
+        // Last-call values for debugging
+        set("last_mimi_ms", self.metrics.last_mimi_ms);
+        set("last_stt_ms", self.metrics.last_stt_ms);
+        obj.into()
     }
 
     /// Flush remaining text after end of speech.
@@ -266,6 +394,7 @@ impl SttEngine {
         if let Some(mimi) = &mut self.mimi {
             mimi.reset();
         }
+        self.metrics.reset();
     }
 
     /// Check if the model is loaded and ready.

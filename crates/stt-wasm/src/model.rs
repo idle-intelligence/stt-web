@@ -278,44 +278,6 @@ fn apply_sliding_window_mask_with_offset(
 }
 
 // ---------------------------------------------------------------------------
-// Diagnostic helpers
-// ---------------------------------------------------------------------------
-
-fn norm_scalar(t: &Tensor<Wgpu, 3>) -> Tensor<Wgpu, 1> {
-    let [a, b, c] = t.dims();
-    let flat: Tensor<Wgpu, 1> = t.clone().reshape([a * b * c]);
-    (flat.clone() * flat).sum().sqrt()
-}
-
-fn norm_scalar_4d(t: &Tensor<Wgpu, 4>) -> Tensor<Wgpu, 1> {
-    let [a, b, c, d] = t.dims();
-    let flat: Tensor<Wgpu, 1> = t.clone().reshape([a * b * c * d]);
-    (flat.clone() * flat).sum().sqrt()
-}
-
-/// Diagnostic data from attention (GPU scalar tensors — call into_data_async to read).
-pub struct AttnDiag {
-    pub q_norm: Tensor<Wgpu, 1>,
-    pub k_norm: Tensor<Wgpu, 1>,
-    pub v_norm: Tensor<Wgpu, 1>,
-    pub cache_seq_len: usize,
-    pub scores_norm: Tensor<Wgpu, 1>,
-    pub attn_out_norm: Tensor<Wgpu, 1>,
-}
-
-/// Diagnostic data from a full forward pass.
-pub struct ForwardDiag {
-    pub input_norm: Tensor<Wgpu, 1>,
-    pub layer0_after_norm: Tensor<Wgpu, 1>,
-    pub layer0_attn: AttnDiag,
-    pub layer0_post_attn_norm: Tensor<Wgpu, 1>,
-    pub layer0_post_ffn_norm: Tensor<Wgpu, 1>,
-    pub final_pre_logits_norm: Tensor<Wgpu, 1>,
-    /// Norm after each of the 16 layers (single GPU tensor for efficient readback).
-    pub per_layer_norms: Tensor<Wgpu, 1>,
-}
-
-// ---------------------------------------------------------------------------
 // RmsNorm wrapper
 // ---------------------------------------------------------------------------
 
@@ -428,68 +390,6 @@ impl Q4Attention {
         let out = out.swap_dims(1, 2);
         let out = out.reshape([batch, seq_len, self.n_heads * self.head_dim]);
         self.out_proj.forward(out)
-    }
-
-    /// Forward pass with KV cache + diagnostics (captures Q/K/V norms, scores, etc).
-    pub fn forward_with_cache_diag(
-        &self,
-        x: Tensor<Wgpu, 3>,
-        rope: &RoPE,
-        cache: &mut KVCache,
-    ) -> (Tensor<Wgpu, 3>, AttnDiag) {
-        let [batch, seq_len, _] = x.dims();
-        let offset = cache.seq_len();
-
-        let qkv = self.in_proj.forward(x);
-        let (q, k, v) = self.split_qkv(qkv);
-
-        let q_norm = norm_scalar(&q);
-        let k_norm = norm_scalar(&k);
-        let v_norm = norm_scalar(&v);
-
-        let q = q.reshape([batch, seq_len, self.n_heads, self.head_dim]);
-        let k = k.reshape([batch, seq_len, self.n_kv_heads, self.head_dim]);
-        let v = v.reshape([batch, seq_len, self.n_kv_heads, self.head_dim]);
-
-        let (q, k) = rope.apply(q, k, offset);
-
-        let q = q.swap_dims(1, 2);
-        let k = k.swap_dims(1, 2);
-        let v = v.swap_dims(1, 2);
-
-        let (k, v) = cache.update(k, v);
-        let total_seq_len = cache.seq_len();
-
-        let (k, v) = self.expand_kv(k, v);
-
-        let k_t = k.swap_dims(2, 3);
-        let scores = q.matmul(k_t) * self.scale;
-        let scores_norm = norm_scalar_4d(&scores);
-
-        let scores = apply_causal_mask_with_offset(scores, seq_len, total_seq_len, offset);
-        let scores = if let Some(window) = self.sliding_window {
-            apply_sliding_window_mask_with_offset(scores, seq_len, total_seq_len, window, offset)
-        } else {
-            scores
-        };
-
-        let attn = softmax(scores, 3);
-        let out = attn.matmul(v);
-        let attn_out_norm = norm_scalar_4d(&out);
-
-        let out = out.swap_dims(1, 2);
-        let out = out.reshape([batch, seq_len, self.n_heads * self.head_dim]);
-        let result = self.out_proj.forward(out);
-
-        let diag = AttnDiag {
-            q_norm,
-            k_norm,
-            v_norm,
-            cache_seq_len: total_seq_len,
-            scores_norm,
-            attn_out_norm,
-        };
-        (result, diag)
     }
 
     /// Forward pass without KV cache (for prefill).
@@ -631,24 +531,6 @@ impl Q4TransformerBlock {
         x + residual
     }
 
-    pub fn forward_with_cache_diag(
-        &self,
-        x: Tensor<Wgpu, 3>,
-        rope: &RoPE,
-        cache: &mut KVCache,
-    ) -> (Tensor<Wgpu, 3>, Tensor<Wgpu, 1>, AttnDiag) {
-        let residual = x.clone();
-        let normed = self.attention_norm.forward(x);
-        let after_norm = norm_scalar(&normed);
-        let (attn_out, attn_diag) = self.attention.forward_with_cache_diag(normed, rope, cache);
-        let x = attn_out + residual;
-
-        let residual = x.clone();
-        let x = self.ffn_norm.forward(x);
-        let x = self.ffn.forward(x);
-        (x + residual, after_norm, attn_diag)
-    }
-
     pub fn forward(
         &self,
         x: Tensor<Wgpu, 3>,
@@ -750,97 +632,6 @@ impl SttModel {
         // Output norm + text linear → logits
         let x = self.out_norm.forward(x);
         self.text_linear.forward(x)
-    }
-
-    /// Forward pass with full diagnostics (layer 0 instrumented).
-    ///
-    /// Returns (logits, ForwardDiag) where diag contains GPU scalar norms.
-    /// Call `into_data_async()` on each norm tensor to read back values.
-    pub fn forward_diag(
-        &self,
-        audio_tokens: &[u32],
-        text_token: u32,
-        cache: &mut LayerCaches,
-    ) -> (Tensor<Wgpu, 3>, ForwardDiag) {
-        let dim = self.config.hidden_size;
-        let mut sum = vec![0.0f32; dim];
-        for (i, &token) in audio_tokens.iter().enumerate() {
-            self.audio_emb[i].embed_id_add_cpu(token, &mut sum);
-        }
-        self.text_emb.embed_id_add_cpu(text_token, &mut sum);
-
-        let input = Tensor::<Wgpu, 3>::from_data(
-            burn::tensor::TensorData::new(sum, [1, 1, dim]),
-            &self.device,
-        );
-        let input_norm = norm_scalar(&input);
-
-        let mut x = input;
-
-        // Layer 0 with diagnostics
-        if let Some(c) = cache.get_mut(0) {
-            let (out, after_norm, attn_diag) =
-                self.layers[0].forward_with_cache_diag(x, &self.rope, c);
-            let post_attn = norm_scalar(&out);
-            x = out;
-
-            // Collect per-layer norms (all on GPU, single readback later)
-            let mut layer_norms: Vec<Tensor<Wgpu, 1>> = vec![post_attn.clone()];
-
-            // Remaining layers
-            for (i, layer) in self.layers.iter().enumerate().skip(1) {
-                if let Some(c) = cache.get_mut(i) {
-                    x = layer.forward_with_cache(x, &self.rope, c);
-                    layer_norms.push(norm_scalar(&x));
-                }
-            }
-
-            // Stack all layer norms into a single tensor [num_layers]
-            let per_layer_norms = Tensor::cat(layer_norms, 0);
-
-            let normed = self.out_norm.forward(x);
-            let final_pre_logits = norm_scalar(&normed);
-            let logits = self.text_linear.forward(normed);
-
-            let diag = ForwardDiag {
-                input_norm,
-                layer0_after_norm: after_norm,
-                layer0_attn: attn_diag,
-                layer0_post_attn_norm: post_attn.clone(),
-                layer0_post_ffn_norm: post_attn,
-                final_pre_logits_norm: final_pre_logits,
-                per_layer_norms,
-            };
-
-            (logits, diag)
-        } else {
-            // Fallback: no cache for layer 0 (shouldn't happen)
-            for (i, layer) in self.layers.iter().enumerate() {
-                if let Some(c) = cache.get_mut(i) {
-                    x = layer.forward_with_cache(x, &self.rope, c);
-                }
-            }
-            let normed = self.out_norm.forward(x);
-            let zero = Tensor::<Wgpu, 1>::zeros([1], &self.device);
-            let logits = self.text_linear.forward(normed);
-            let diag = ForwardDiag {
-                input_norm,
-                layer0_after_norm: zero.clone(),
-                layer0_attn: AttnDiag {
-                    q_norm: zero.clone(),
-                    k_norm: zero.clone(),
-                    v_norm: zero.clone(),
-                    cache_seq_len: 0,
-                    scores_norm: zero.clone(),
-                    attn_out_norm: zero.clone(),
-                },
-                layer0_post_attn_norm: zero.clone(),
-                layer0_post_ffn_norm: zero.clone(),
-                final_pre_logits_norm: zero.clone(),
-                per_layer_norms: zero,
-            };
-            (logits, diag)
-        }
     }
 
     /// Create a new LayerCaches for this model.

@@ -29,6 +29,7 @@ export class SttClient {
         this.onTranscript = options.onTranscript || (() => {});
         this.onStatus = options.onStatus || (() => {});
         this.onError = options.onError || console.error;
+        this.onMetrics = options.onMetrics || (() => {});
 
         // URL configuration for embedding
         this.baseUrl = (options.baseUrl || '').replace(/\/+$/, '');
@@ -110,17 +111,12 @@ export class SttClient {
         this.workletNode = new AudioWorkletNode(this.audioContext, 'audio-processor');
 
         // Forward audio chunks from worklet to worker.
-        // When the worklet sends 'done' (after flushing remaining samples on stop),
-        // we forward 'stop' to the worker — guaranteeing all audio arrives before stop.
         this.workletNode.port.onmessage = (e) => {
             if (e.data.type === 'audio') {
                 this.worker.postMessage(
                     { type: 'audio', samples: e.data.samples },
                     [e.data.samples.buffer]
                 );
-            } else if (e.data.type === 'done') {
-                // All audio has been flushed — now safe to tell the worker to stop.
-                this.worker.postMessage({ type: 'stop' });
             }
         };
 
@@ -141,34 +137,18 @@ export class SttClient {
             return;
         }
 
-        // Signal worklet to stop. The worklet will:
-        //   1. Set _active = false
-        //   2. On the next process() call: flush remaining buffered samples, then
-        //      send { type: 'done' } to signal completion
-        // The port.onmessage handler (set in startRecording) receives 'done' and
-        // forwards { type: 'stop' } to the worker, guaranteeing all audio arrives
-        // before the stop command. A fallback timeout handles the edge case where
-        // the worklet is disconnected before it can send 'done'.
+        // Send stop to worker immediately. The worker's queue drainer will skip
+        // any remaining queued audio chunks once it sees 'stop'.
+        this.worker.postMessage({ type: 'stop' });
+
+        // Tell the worklet to stop processing (best-effort — it may already be
+        // disconnected by the time it processes this).
         if (this.workletNode) {
-            // Capture worker reference before nulling the worklet
-            const worker = this.worker;
-            const fallback = setTimeout(() => {
-                worker.postMessage({ type: 'stop' });
-            }, 500);
-
-            // Override the done handler to also clear the fallback
-            const prevOnMessage = this.workletNode.port.onmessage;
-            this.workletNode.port.onmessage = (e) => {
-                prevOnMessage(e);
-                if (e.data.type === 'done') {
-                    clearTimeout(fallback);
-                }
-            };
-
-            this.workletNode.port.postMessage({ type: 'stop' });
-        } else {
-            // No worklet — send stop directly
-            this.worker.postMessage({ type: 'stop' });
+            try {
+                this.workletNode.port.postMessage({ type: 'stop' });
+            } catch (_) {
+                // Worklet may already be disconnected
+            }
         }
 
         // Disconnect audio graph (stop receiving mic input)
@@ -240,6 +220,10 @@ export class SttClient {
 
             case 'transcript':
                 this.onTranscript(data.text, data.final || false, data.rtf || null);
+                break;
+
+            case 'metrics':
+                this.onMetrics(data);
                 break;
 
             case 'error':
