@@ -289,7 +289,7 @@
                 metricFps.textContent = data.framesPerSec.toFixed(1);
             }
             if (data.rtf != null) {
-                metricRtf.textContent = (typeof data.rtf === 'object' ? data.rtf.total : data.rtf).toFixed(2);
+                metricRtf.textContent = data.rtf.toFixed(2);
             }
             if (data.avgFrameMs != null) {
                 metricFrameMs.textContent = data.avgFrameMs.toFixed(1);
@@ -458,6 +458,8 @@
                 const pcm = rendered.getChannelData(0);
 
                 // Reset state before feeding
+                // Note: posting directly to client.worker to use transferable buffers
+                // for zero-copy audio transfer, bypassing SttClient's wrapper.
                 client.worker.postMessage({ type: 'reset' });
                 transcriptText = '';
                 transcriptTextEl.textContent = '';
