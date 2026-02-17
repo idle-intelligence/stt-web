@@ -80,7 +80,7 @@ tests/reference/      # shared test fixtures (wav, tokens, transcripts)
 - `cubecl = "0.9"` (with vendored patch for workgroup limits)
 - `wasm-bindgen = "0.2"`, `js-sys`, `web-sys` (WASM target)
 - `wgpu = "26"` (direct device init in WASM)
-- `hound = "3.5"` (WAV I/O), `rubato = "1.0"` (resampling)
+- `hound = "3.5"` (WAV I/O)
 - `tokenizers = "0.22"` (native-only, has C deps)
 
 ## Feature Flags
