@@ -243,25 +243,22 @@ impl SttEngine {
         Ok(())
     }
 
-    /// Initialize the Mimi audio codec from a weights URL.
+    /// Initialize the Mimi audio codec from pre-fetched weight bytes.
     #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = loadMimi))]
-    pub async fn load_mimi(&mut self, weights_url: &str) -> Result<(), JsError> {
-        wasm_log(&format!("[stt] Loading Mimi codec from {weights_url}..."));
-        let mimi = mimi_wasm::MimiCodec::new(weights_url)
-            .await
+    pub fn load_mimi(&mut self, data: &[u8]) -> Result<(), JsError> {
+        wasm_log(&format!("[stt] Loading Mimi codec ({} bytes)...", data.len()));
+        let mimi = mimi_wasm::MimiCodec::from_bytes(data)
             .map_err(|e| JsError::new(&format!("Failed to load Mimi: {e:?}")))?;
         self.mimi = Some(mimi);
         wasm_log("[stt] Mimi codec loaded");
         Ok(())
     }
 
-    /// Load the SentencePiece tokenizer from a `.model` file URL.
+    /// Load the SentencePiece tokenizer from pre-fetched `.model` bytes.
     #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = loadTokenizer))]
-    pub async fn load_tokenizer(&mut self, url: &str) -> Result<(), JsError> {
-        wasm_log(&format!("[stt] Loading tokenizer from {url}..."));
-        let decoder = SpmDecoder::load(url)
-            .await
-            .map_err(|e| JsError::new(&format!("Failed to load tokenizer: {e}")))?;
+    pub fn load_tokenizer(&mut self, data: &[u8]) -> Result<(), JsError> {
+        wasm_log(&format!("[stt] Loading tokenizer ({} bytes)...", data.len()));
+        let decoder = SpmDecoder::from_bytes(data);
         wasm_log(&format!("[stt] Tokenizer loaded: {} vocab entries", decoder.vocab_len()));
         self.tokenizer = Some(decoder);
         Ok(())

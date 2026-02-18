@@ -106,14 +106,10 @@ impl MimiCodec {
 
 // Shared implementation (native + WASM)
 impl MimiCodec {
-    async fn create(weights_source: &str) -> Result<MimiCodec, MimiError> {
+    /// Create from pre-fetched weight bytes (no network I/O).
+    pub fn from_bytes(weights_data: &[u8]) -> Result<MimiCodec, MimiError> {
         let config = MimiConfig::default();
-
-        // Fetch weights (WASM: fetch from URL, Native: read from file)
-        let weights_data = Self::fetch_weights(weights_source).await?;
-
-        // Parse safetensors
-        let tensors = weights::load_safetensors(&weights_data)?;
+        let tensors = weights::load_safetensors(weights_data)?;
 
         let encoder = Self::build_encoder(&tensors, &config)?;
         let encoder_transformer = Self::build_transformer(&tensors, &config)?;
@@ -133,6 +129,11 @@ impl MimiCodec {
         };
         codec.init_streaming();
         Ok(codec)
+    }
+
+    async fn create(weights_source: &str) -> Result<MimiCodec, MimiError> {
+        let weights_data = Self::fetch_weights(weights_source).await?;
+        Self::from_bytes(&weights_data)
     }
 
     #[cfg(feature = "wasm")]

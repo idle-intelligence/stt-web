@@ -16,10 +16,12 @@
  *   stt.stopRecording();
  *   stt.destroy();
  *
- * Embeddable usage with custom base URL:
+ * Model weights are fetched from HuggingFace by default.
+ * Override with custom URLs if self-hosting:
  *   const stt = new SttClient({
- *       baseUrl: 'https://cdn.example.com/stt',
- *       shardList: ['shard-00000.gguf', 'shard-00001.gguf'],
+ *       modelUrl: 'https://cdn.example.com/stt-1b-en_fr-q4.gguf',
+ *       mimiUrl: 'https://cdn.example.com/mimi.safetensors',
+ *       tokenizerUrl: 'https://cdn.example.com/tokenizer.model',
  *       onTranscript: (text, isFinal) => console.log(text),
  *   });
  */
@@ -36,7 +38,8 @@ export class SttClient {
         this.workerUrl = options.workerUrl || (this.baseUrl + '/worker.js');
         this.audioProcessorUrl = options.audioProcessorUrl || (this.baseUrl + '/audio-processor.js');
 
-        // Optional overrides passed to the worker
+        // Optional overrides passed to the worker (defaults fetch from HuggingFace)
+        this.modelUrl = options.modelUrl || null;
         this.shardList = options.shardList || null;
         this.mimiUrl = options.mimiUrl || null;
         this.tokenizerUrl = options.tokenizerUrl || null;
@@ -75,6 +78,7 @@ export class SttClient {
 
             // Send load command to worker with URL config
             const config = { baseUrl: this.baseUrl };
+            if (this.modelUrl) config.modelUrl = this.modelUrl;
             if (this.shardList) config.shardList = this.shardList;
             if (this.mimiUrl) config.mimiUrl = this.mimiUrl;
             if (this.tokenizerUrl) config.tokenizerUrl = this.tokenizerUrl;
