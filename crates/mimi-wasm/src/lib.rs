@@ -70,6 +70,7 @@ pub struct MimiCodec {
     // Audio buffer for streaming (accumulates until we have enough for one frame)
     audio_buffer: Vec<f32>,
     // Samples per frame (sample_rate / frame_rate)
+    #[allow(dead_code)]
     samples_per_frame: usize,
 }
 
@@ -79,6 +80,7 @@ pub struct MimiCodec {
 impl MimiCodec {
     /// Create a new codec instance. Downloads/loads Mimi weights from the given URL.
     #[wasm_bindgen(constructor)]
+    #[allow(deprecated)] // wasm-bindgen async constructor deprecation
     pub async fn new(weights_url: &str) -> Result<MimiCodec, JsError> {
         console_error_panic_hook::set_once();
         Self::create(weights_url).await.map_err(|e| JsError::new(&e.to_string()))
@@ -491,11 +493,12 @@ impl MimiCodec {
         }
 
         // Build input tensor: (batch=1, channels=1, time)
+        // Use from_shape_vec to avoid zeroing memory then overwriting
         let time = samples.len();
-        let mut data = Array3::<f32>::zeros((1, 1, time));
-        let data_slice = data.as_slice_mut().unwrap();
-        data_slice[..time].copy_from_slice(samples);
-        let input = Tensor3::new(data);
+        let input = Tensor3::new(
+            Array3::from_shape_vec((1, 1, time), samples.to_vec())
+                .expect("input reshape"),
+        );
 
         // Stream through SEANet encoder (handles buffering internally)
         let encoded = match self.encoder.step(&input) {
@@ -528,6 +531,7 @@ impl MimiCodec {
 
     /// Profiled version of feed_audio that returns per-stage timings.
     #[cfg(not(feature = "wasm"))]
+    #[allow(clippy::type_complexity)]
     pub fn feed_audio_profiled(&mut self, samples: &[f32]) -> (Vec<u32>, Option<(f64, f64, f64, f64, (usize, usize, usize), usize)>) {
         use std::time::Instant;
 
@@ -536,9 +540,10 @@ impl MimiCodec {
         }
 
         let time = samples.len();
-        let mut data = Array3::<f32>::zeros((1, 1, time));
-        data.as_slice_mut().unwrap()[..time].copy_from_slice(samples);
-        let input = Tensor3::new(data);
+        let input = Tensor3::new(
+            Array3::from_shape_vec((1, 1, time), samples.to_vec())
+                .expect("input reshape"),
+        );
 
         let t0 = Instant::now();
         let encoded = match self.encoder.step(&input) {

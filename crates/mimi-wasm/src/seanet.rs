@@ -39,8 +39,9 @@ impl ResidualBlock {
     pub fn step(&mut self, x: &Tensor3) -> Option<Tensor3> {
         let residual = x.elu(1.0);
         let residual = self.conv1.step(&residual)?;
-        let residual = residual.elu(1.0);
-        let mut residual = self.conv2.step(&residual)?;
+        let mut residual_elu = residual;
+        residual_elu.elu_inplace(1.0);
+        let mut residual = self.conv2.step(&residual_elu)?;
 
         match &mut self.shortcut {
             Some(shortcut) => {

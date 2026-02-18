@@ -2,6 +2,8 @@
 //!
 //! Based on ndarray with shape (batch, channels, time) for 3D tensors.
 
+#![allow(clippy::needless_range_loop)]
+
 use ndarray::{Array1, Array3, ArrayView3, Axis};
 use std::ops::{Add, Mul};
 
@@ -46,7 +48,7 @@ impl Tensor3 {
     }
 
     /// Get a view of the tensor.
-    pub fn view(&self) -> ArrayView3<f32> {
+    pub fn view(&self) -> ArrayView3<'_, f32> {
         self.data.view()
     }
 

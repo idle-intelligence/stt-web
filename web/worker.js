@@ -77,8 +77,32 @@ async function drainQueue() {
     busy = false;
 }
 
+// Direct MessagePort from AudioWorklet (bypasses main thread throttling).
+// Set up when the main thread sends { type: 'audio-port', port }.
+let audioPort = null;
+
 self.onmessage = (e) => {
     const { type, ...data } = e.data;
+
+    // Handle direct audio port setup (not queued — one-time wiring).
+    if (type === 'audio-port') {
+        if (audioPort) {
+            audioPort.onmessage = null;
+            audioPort.close();
+        }
+        audioPort = data.port;
+        audioPort.onmessage = (ev) => {
+            // Audio and done messages arrive here from the AudioWorklet,
+            // bypassing the main thread entirely.
+            if (ev.data.type === 'audio') {
+                msgQueue.push({ type: 'audio', data: { samples: ev.data.samples } });
+                drainQueue();
+            }
+            // 'done' from worklet is informational — stop is sent separately.
+        };
+        return;
+    }
+
     msgQueue.push({ type, data });
     drainQueue();
 };
@@ -212,7 +236,11 @@ async function handleLoad(config) {
     const tokenizerUrl = config.tokenizerUrl || (base + '/models/tokenizer.model');
     await engine.loadTokenizer(tokenizerUrl);
 
-    // 8. Signal ready.
+    // 8. Warm up GPU pipelines (pre-compile shaders).
+    self.postMessage({ type: 'status', text: 'Warming up GPU...' });
+    await engine.warmup();
+
+    // 9. Signal ready.
     logState('Model loaded, ready to receive audio');
     self.postMessage({ type: 'status', text: 'Ready', ready: true });
 }

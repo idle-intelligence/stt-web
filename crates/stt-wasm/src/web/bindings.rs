@@ -234,7 +234,7 @@ impl SttEngine {
             .finalize(&self.device)
             .map_err(|e| JsError::new(&format!("Failed to finalize model: {e}")))?;
 
-        let stream = SttStream::new(self.config.clone(), self.config.num_layers);
+        let stream = SttStream::new(self.config.clone(), model.create_cache());
 
         self.model = Some(model);
         self.stream = Some(stream);
@@ -272,6 +272,11 @@ impl SttEngine {
     /// Returns decoded transcript text if any new tokens were produced.
     /// Audio goes through: Mimi codec → STT transformer → text tokens → detokenize.
     /// Per-call timing is stored in metrics (retrieve via `getMetrics()`).
+    ///
+    /// **Pipelining:** The last frame's GPU work (forward + argmax) is left
+    /// pending at the end of each call. On the *next* call, Mimi encode (CPU)
+    /// runs first while the GPU finishes, then we resolve the pending readback.
+    /// This overlaps ~20ms of CPU work with the GPU readback latency.
     #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = feedAudio))]
     pub async fn feed_audio(&mut self, samples: &[f32]) -> Result<String, JsError> {
         let t_start = now_ms();
@@ -295,33 +300,65 @@ impl SttEngine {
             .as_mut()
             .ok_or_else(|| JsError::new("Stream not initialized."))?;
 
-        // --- Mimi encode ---
+        // --- Mimi encode (CPU) ---
+        // This runs while any pending GPU work from the previous call executes
+        // on the GPU hardware in parallel.
         let t_mimi_start = now_ms();
         let tokens = mimi.feed_audio(samples);
         let t_mimi_end = now_ms();
 
-        // --- STT forward ---
-        let num_codebooks = self.config.num_codebooks;
+        // --- Resolve pending GPU readback from previous call ---
+        // By now the GPU has had ~20ms of Mimi CPU time to finish, so this
+        // await should resolve near-instantly.
         let mut text_tokens = Vec::new();
+        if let Some(token) = stream.resolve_pending_as_token().await {
+            if !self.metrics.has_token
+                && token != self.config.text_padding_id
+                && token != 0
+            {
+                self.metrics.has_token = true;
+                self.metrics.first_token_ms = now_ms();
+            }
+            text_tokens.push(token);
+        }
+
+        // --- STT forward (pipelined) ---
+        let num_codebooks = self.config.num_codebooks;
         let mimi_frames = tokens.len() / num_codebooks;
 
         let t_stt_start = now_ms();
-        for frame_start in (0..tokens.len()).step_by(num_codebooks) {
-            if frame_start + num_codebooks > tokens.len() {
-                break;
-            }
-            let frame = &tokens[frame_start..frame_start + num_codebooks];
 
-            if let Some(token) = stream.feed_frame(frame, model).await {
-                // Track TTFB: first real text token (not padding=3, not EOS=0)
-                if !self.metrics.has_token
-                    && token != self.config.text_padding_id
-                    && token != 0
-                {
-                    self.metrics.has_token = true;
-                    self.metrics.first_token_ms = now_ms();
+        // Build list of frame slices
+        let frame_starts: Vec<usize> = (0..tokens.len())
+            .step_by(num_codebooks)
+            .filter(|&s| s + num_codebooks <= tokens.len())
+            .collect();
+        let n_frames = frame_starts.len();
+
+        for (i, &frame_start) in frame_starts.iter().enumerate() {
+            let frame = &tokens[frame_start..frame_start + num_codebooks];
+            let is_last = i == n_frames - 1;
+
+            // Submit GPU work (forward + argmax, no await)
+            stream.submit_frame(frame, model);
+
+            if is_last {
+                // Leave the last frame pending — it will be resolved on the
+                // next feed_audio call, overlapping with Mimi encode.
+                // Don't await here.
+            } else {
+                // For non-last frames, resolve immediately (we need the token
+                // for the next frame's input).
+                if let Some(token) = stream.resolve_pending_as_token().await {
+                    if !self.metrics.has_token
+                        && token != self.config.text_padding_id
+                        && token != 0
+                    {
+                        self.metrics.has_token = true;
+                        self.metrics.first_token_ms = now_ms();
+                    }
+                    text_tokens.push(token);
                 }
-                text_tokens.push(token);
             }
         }
         let t_stt_end = now_ms();
@@ -400,6 +437,60 @@ impl SttEngine {
             mimi.reset();
         }
         self.metrics.reset();
+    }
+
+    /// Run warmup passes to pre-compile WebGPU shader pipelines.
+    ///
+    /// Feeds 10 dummy frames through the STT transformer with varied audio
+    /// tokens, exercising all shader variants and the delay→emit transition
+    /// (text_delay = 7). Uses `reset_keep_buffers()` afterwards to keep GPU
+    /// KV cache buffers allocated, avoiding re-allocation on first real frame.
+    ///
+    /// Call after `loadModel()` + `loadMimi()`. Reduces TTFB by ~150-400ms.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen)]
+    pub async fn warmup(&mut self) -> Result<(), JsError> {
+        let model = self
+            .model
+            .as_ref()
+            .ok_or_else(|| JsError::new("Model not loaded. Call loadModel first."))?;
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| JsError::new("Stream not initialized."))?;
+
+        let t0 = now_ms();
+
+        // Run 10 forward passes (past text_delay=7) to exercise:
+        // - All Q4 matmul / RmsNorm / softmax / RoPE shader variants
+        // - KV cache lazy allocation and ring buffer writes
+        // - The delay→emit code path transition (frame 8+)
+        // Use varied token values to avoid any zero-optimized GPU paths.
+        let num_cb = self.config.num_codebooks;
+        for i in 0..10u32 {
+            let audio_tokens: Vec<u32> = (0..num_cb)
+                .map(|cb| (i * 7 + cb as u32 * 13 + 1) % 2048)
+                .collect();
+            let _ = stream.feed_frame(&audio_tokens, model).await;
+        }
+
+        // Also warm up Mimi with a silent chunk if loaded
+        if let Some(mimi) = &mut self.mimi {
+            let silence = vec![0.0f32; 1920]; // one Mimi frame
+            let _ = mimi.feed_audio(&silence);
+        }
+
+        // Reset state but keep GPU KV cache buffers allocated.
+        // A full reset() would drop the GPU tensors, forcing lazy
+        // re-allocation on the first real frame.
+        stream.reset_keep_buffers();
+        if let Some(mimi) = &mut self.mimi {
+            mimi.reset();
+        }
+        self.metrics.reset();
+
+        let elapsed = now_ms() - t0;
+        wasm_log(&format!("[stt] Warmup complete ({elapsed:.0}ms, 10 frames)"));
+        Ok(())
     }
 
     /// Check if the model is loaded and ready.

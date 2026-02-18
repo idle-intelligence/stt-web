@@ -126,71 +126,98 @@ impl RoPE {
 // KVCache
 // ---------------------------------------------------------------------------
 
-/// KV Cache for autoregressive decoding (dynamic concatenation mode).
+/// Ring-buffer KV cache for autoregressive decoding.
+///
+/// Writes new K/V entries at `write_pos` via `slice_assign` (O(1) per step),
+/// wrapping around when the buffer is full. This eliminates the O(n) copy
+/// per step that `Tensor::cat` causes and avoids per-step GPU allocation.
+///
+/// RoPE is applied to K *before* it enters the cache, so positional info is
+/// baked into the values. For unmasked attention (kv_len <= window+1), order
+/// of entries doesn't affect results since attention is permutation-equivariant.
 pub struct KVCache {
-    pub k: Option<Tensor<Wgpu, 4>>,
-    pub v: Option<Tensor<Wgpu, 4>>,
+    k: Option<Tensor<Wgpu, 4>>,
+    v: Option<Tensor<Wgpu, 4>>,
     /// Absolute position counter (total tokens seen). Used for RoPE.
     offset: usize,
+    /// Number of valid entries (0..=max_len).
+    len: usize,
+    /// Ring buffer write position (wraps at max_len).
+    write_pos: usize,
+    /// Pre-allocated capacity (sliding_window + 1 = 751).
+    max_len: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    device: WgpuDevice,
 }
 
 impl KVCache {
-    pub fn new() -> Self {
-        Self { k: None, v: None, offset: 0 }
+    /// Create a new KV cache. Buffers are lazily allocated on first `update()`.
+    pub fn new(max_len: usize, n_kv_heads: usize, head_dim: usize, device: &WgpuDevice) -> Self {
+        Self {
+            k: None,
+            v: None,
+            offset: 0,
+            len: 0,
+            write_pos: 0,
+            max_len,
+            n_kv_heads,
+            head_dim,
+            device: device.clone(),
+        }
     }
 
-    /// Update cache with new K, V and return full sequences.
+    /// Update cache with new K, V and return all valid entries.
     ///
-    /// If `max_len` is set, the cache is truncated to at most `max_len`
-    /// entries (keeping the most recent ones). This prevents O(n²) growth
-    /// for sliding-window attention where old entries are masked anyway.
+    /// Lazy-allocates GPU buffers on first call, then writes at `write_pos`
+    /// via `slice_assign` (O(1)). When the buffer fills, `write_pos` wraps
+    /// around, overwriting the oldest entry.
     pub fn update(
         &mut self,
         k: Tensor<Wgpu, 4>,
         v: Tensor<Wgpu, 4>,
-        max_len: Option<usize>,
     ) -> (Tensor<Wgpu, 4>, Tensor<Wgpu, 4>) {
-        let new_seq_len = k.dims()[2];
-        self.offset += new_seq_len;
+        let [b, _h, _seq, _d] = k.dims();
 
-        let k_full = match &self.k {
-            None => {
-                self.k = Some(k.clone());
-                k
-            }
-            Some(cache) => {
-                let full = Tensor::cat(vec![cache.clone(), k], 2);
-                self.k = Some(full.clone());
-                full
-            }
-        };
-        let v_full = match &self.v {
-            None => {
-                self.v = Some(v.clone());
-                v
-            }
-            Some(cache) => {
-                let full = Tensor::cat(vec![cache.clone(), v], 2);
-                self.v = Some(full.clone());
-                full
-            }
-        };
-
-        // Truncate to max_len if cache exceeds it.
-        if let Some(max) = max_len {
-            let cur_len = k_full.dims()[2];
-            if cur_len > max {
-                let start = cur_len - max;
-                let [b, h, _s, d] = k_full.dims();
-                let k_trunc = k_full.slice([0..b, 0..h, start..cur_len, 0..d]);
-                let v_trunc = v_full.slice([0..b, 0..h, start..cur_len, 0..d]);
-                self.k = Some(k_trunc.clone());
-                self.v = Some(v_trunc.clone());
-                return (k_trunc, v_trunc);
-            }
+        // Lazy-allocate on first call
+        if self.k.is_none() {
+            self.k = Some(Tensor::zeros(
+                [b, self.n_kv_heads, self.max_len, self.head_dim],
+                &self.device,
+            ));
+            self.v = Some(Tensor::zeros(
+                [b, self.n_kv_heads, self.max_len, self.head_dim],
+                &self.device,
+            ));
         }
 
-        (k_full, v_full)
+        // Take ownership (refcount=1) for in-place slice_assign
+        let k_buf = self.k.take().unwrap();
+        let v_buf = self.v.take().unwrap();
+        let [b, h, _, hd] = k_buf.dims();
+        let pos = self.write_pos;
+
+        let k_buf = k_buf.slice_assign([0..b, 0..h, pos..pos + 1, 0..hd], k);
+        let v_buf = v_buf.slice_assign([0..b, 0..h, pos..pos + 1, 0..hd], v);
+
+        // Advance ring buffer
+        self.write_pos = (self.write_pos + 1) % self.max_len;
+        self.offset += 1;
+        self.len = (self.len + 1).min(self.max_len);
+
+        // Return valid portion
+        let result = if self.len < self.max_len {
+            let k_view = k_buf.clone().slice([0..b, 0..h, 0..self.len, 0..hd]);
+            let v_view = v_buf.clone().slice([0..b, 0..h, 0..self.len, 0..hd]);
+            (k_view, v_view)
+        } else {
+            (k_buf.clone(), v_buf.clone())
+        };
+
+        self.k = Some(k_buf);
+        self.v = Some(v_buf);
+
+        result
     }
 
     /// Absolute position (total tokens seen). Used for RoPE encoding.
@@ -199,13 +226,35 @@ impl KVCache {
     }
 
     pub fn seq_len(&self) -> usize {
-        self.k.as_ref().map(|k| k.dims()[2]).unwrap_or(0)
+        self.len
     }
 
     pub fn reset(&mut self) {
         self.k = None;
         self.v = None;
         self.offset = 0;
+        self.len = 0;
+        self.write_pos = 0;
+    }
+
+    /// Reset state counters but keep GPU buffers allocated (zeroed).
+    ///
+    /// After warmup the KV cache buffers are already allocated on the GPU.
+    /// A full `reset()` drops them, forcing lazy re-allocation on the first
+    /// real frame which adds latency. This variant zeros the data in-place
+    /// so the buffers remain hot.
+    pub fn reset_keep_buffers(&mut self) {
+        if let Some(ref k) = self.k {
+            let shape = k.dims();
+            self.k = Some(Tensor::zeros(shape, &self.device));
+        }
+        if let Some(ref v) = self.v {
+            let shape = v.dims();
+            self.v = Some(Tensor::zeros(shape, &self.device));
+        }
+        self.offset = 0;
+        self.len = 0;
+        self.write_pos = 0;
     }
 }
 
@@ -215,9 +264,11 @@ pub struct LayerCaches {
 }
 
 impl LayerCaches {
-    pub fn new(n_layers: usize) -> Self {
+    pub fn new(n_layers: usize, max_len: usize, n_kv_heads: usize, head_dim: usize, device: &WgpuDevice) -> Self {
         Self {
-            caches: (0..n_layers).map(|_| KVCache::new()).collect(),
+            caches: (0..n_layers)
+                .map(|_| KVCache::new(max_len, n_kv_heads, head_dim, device))
+                .collect(),
         }
     }
 
@@ -232,6 +283,13 @@ impl LayerCaches {
     pub fn reset(&mut self) {
         for cache in &mut self.caches {
             cache.reset();
+        }
+    }
+
+    /// Reset state but keep GPU buffers allocated. See [`KVCache::reset_keep_buffers`].
+    pub fn reset_keep_buffers(&mut self) {
+        for cache in &mut self.caches {
+            cache.reset_keep_buffers();
         }
     }
 }
@@ -387,11 +445,7 @@ impl Q4Attention {
         let k = k.swap_dims(1, 2);
         let v = v.swap_dims(1, 2);
 
-        // Truncate cache to sliding_window + 1 entries (entries beyond the
-        // window are masked to -inf in attention, so keeping them just wastes
-        // memory and makes Tensor::cat O(n) per frame → O(n²) total).
-        let max_cache = self.sliding_window.map(|w| w + 1);
-        let (k, v) = cache.update(k, v, max_cache);
+        let (k, v) = cache.update(k, v);
         let total_seq_len = cache.seq_len();
 
         // Expand K, V for GQA if needed
@@ -603,8 +657,19 @@ impl SttModel {
     }
 
     /// Create a new LayerCaches for this model.
+    ///
+    /// Each layer gets a ring-buffer KV cache sized to `sliding_window + 1`.
+    /// Buffers are lazily allocated on first use to avoid upfront GPU memory.
     pub fn create_cache(&self) -> LayerCaches {
-        LayerCaches::new(self.config.num_layers)
+        let head_dim = self.config.hidden_size / self.config.num_heads;
+        let max_cache_len = self.config.sliding_window + 1; // 751
+        LayerCaches::new(
+            self.config.num_layers,
+            max_cache_len,
+            self.config.num_kv_heads,
+            head_dim,
+            &self.device,
+        )
     }
 
     /// Reset KV cache (for new utterance).

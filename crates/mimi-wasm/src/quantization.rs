@@ -3,6 +3,8 @@
 //! Uses a split architecture: 1 semantic codebook (rvq_first) + 31 acoustic codebooks (rvq_rest).
 //! Each sub-RVQ has input/output projections between model dimension (512) and codebook dimension (256).
 
+#![allow(clippy::needless_range_loop)]
+
 use crate::tensor::Tensor3;
 use ndarray::{Array1, Array2, Array3};
 
@@ -61,16 +63,15 @@ impl VectorQuantizer {
 
             if time <= 2 {
                 // Optimized path for streaming (time=1 or 2):
-                // Use matrix-vector product per timestep to avoid temp allocations
+                // Extract contiguous x_vec, use ndarray dot for SIMD matvec
+                let mut x_vec = Array1::<f32>::zeros(dim);
                 for t in 0..time {
-                    // Extract input vector from (B, C, T) layout
-                    let mut x_vec = Array1::<f32>::zeros(dim);
                     let xv = x_vec.as_slice_mut().unwrap();
                     for d in 0..dim {
                         xv[d] = x_slice[b_offset + d * time + t];
                     }
 
-                    // Matvec: codebook @ x_vec → (num_bins,) dot products
+                    // Matvec: codebook @ x_vec → (num_bins,) dot products (SIMD)
                     let dots = self.codebook.dot(&x_vec);
                     let dots_s = dots.as_slice().unwrap();
 
@@ -135,6 +136,7 @@ impl VectorQuantizer {
 ///
 /// Projects from model dimension to codebook dimension before quantization.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct ResidualVectorQuantizer {
     /// Input projection: (codebook_dim, input_dim) e.g. (256, 512)
     pub input_proj: Array2<f32>,
@@ -196,9 +198,9 @@ impl ResidualVectorQuantizer {
             let p_b_offset = b * cb_dim * time;
 
             if time <= 2 {
-                // Streaming path: matvec per timestep (avoids temp matrix allocation)
+                // Streaming path: extract contiguous x_vec, use ndarray dot (SIMD)
+                let mut x_vec = Array1::<f32>::zeros(in_dim);
                 for t in 0..time {
-                    let mut x_vec = Array1::<f32>::zeros(in_dim);
                     let xv = x_vec.as_slice_mut().unwrap();
                     for d in 0..in_dim {
                         xv[d] = x_slice[b_offset + d * time + t];

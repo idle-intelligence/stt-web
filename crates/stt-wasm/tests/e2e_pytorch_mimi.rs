@@ -91,7 +91,7 @@ fn test_pytorch_mimi_tokens_to_text() {
         drop(loader);
         let model = parts.finalize(&device).unwrap();
 
-        let mut stream = SttStream::new(config.clone(), config.num_layers);
+        let mut stream = SttStream::new(config.clone(), model.create_cache());
         let mut all_tokens: Vec<u32> = Vec::new();
 
         for (i, frame) in mimi_data.tokens.iter().enumerate() {
