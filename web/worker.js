@@ -16,6 +16,9 @@
  *     { type: 'error', message: string }
  */
 
+// HuggingFace model repository (default source for all weights)
+const HF_BASE = 'https://huggingface.co/idle-intelligence/stt-1b-en_fr-q4_0-webgpu/resolve/main';
+
 let engine = null;
 let sttWasm = null;
 let totalSamples = 0;
@@ -198,25 +201,13 @@ async function handleLoad(config) {
     // 4. Download model weights.
     self.postMessage({ type: 'status', text: 'Downloading model...' });
 
-    let modelFiles;
-    if (config.shardList && config.shardList.length > 0) {
-        modelFiles = config.shardList;
-    } else {
-        const resp = await fetch(base + '/api/shards');
-        const data = await resp.json();
-        modelFiles = data.shards;
-    }
+    const modelUrls = config.shardList && config.shardList.length > 0
+        ? config.shardList
+        : [config.modelUrl || `${HF_BASE}/stt-1b-en_fr-q4_0.gguf`];
 
-    if (modelFiles.length === 0) {
-        throw new Error(
-            'No model files found. Run: python scripts/quantize.py'
-        );
-    }
-
-    for (let i = 0; i < modelFiles.length; i++) {
-        const name = modelFiles[i];
-        const url = base + `/models/${name}`;
-        const label = `Downloading model${modelFiles.length > 1 ? ` (${i + 1}/${modelFiles.length})` : ''}`;
+    for (let i = 0; i < modelUrls.length; i++) {
+        const url = modelUrls[i];
+        const label = `Downloading model${modelUrls.length > 1 ? ` (${i + 1}/${modelUrls.length})` : ''}`;
 
         const buf = await cachedFetch(url, label);
         engine.appendModelShard(new Uint8Array(buf));
@@ -227,14 +218,16 @@ async function handleLoad(config) {
     engine.loadModel();
 
     // 6. Load Mimi codec weights.
-    self.postMessage({ type: 'status', text: 'Loading Mimi codec...' });
-    const mimiUrl = config.mimiUrl || (base + '/models/mimi.safetensors');
-    await engine.loadMimi(mimiUrl);
+    const mimiUrl = config.mimiUrl || `${HF_BASE}/mimi.safetensors`;
+    const mimiBuf = await cachedFetch(mimiUrl, 'Downloading audio codec');
+    self.postMessage({ type: 'status', text: 'Loading audio codec...' });
+    engine.loadMimi(new Uint8Array(mimiBuf));
 
     // 7. Load tokenizer (into WASM engine).
+    const tokenizerUrl = config.tokenizerUrl || `${HF_BASE}/tokenizer.model`;
+    const tokBuf = await cachedFetch(tokenizerUrl, 'Downloading tokenizer');
     self.postMessage({ type: 'status', text: 'Loading tokenizer...' });
-    const tokenizerUrl = config.tokenizerUrl || (base + '/models/tokenizer.model');
-    await engine.loadTokenizer(tokenizerUrl);
+    engine.loadTokenizer(new Uint8Array(tokBuf));
 
     // 8. Warm up GPU pipelines (pre-compile shaders).
     self.postMessage({ type: 'status', text: 'Warming up GPU...' });

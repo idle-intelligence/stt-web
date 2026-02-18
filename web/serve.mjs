@@ -8,7 +8,7 @@
  */
 
 import { createServer } from "node:http";
-import { createReadStream, existsSync, statSync, readdirSync } from "node:fs";
+import { createReadStream, existsSync, statSync } from "node:fs";
 import { join, extname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,23 +26,13 @@ const MIME = {
     ".bin":  "application/octet-stream",
 };
 
-// Model file (single GGUF, no sharding needed — 531MB is well under 2GB WASM limit)
-const MODEL_FILE = "stt-1b-en_fr-q4.gguf";
-
 const server = createServer((req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const pathname = decodeURIComponent(url.pathname);
 
     // CORS headers (needed for WASM + WebGPU in cross-origin workers)
     res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
-    res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
-
-    // API: list model files (single GGUF)
-    if (pathname === "/api/shards") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ shards: [MODEL_FILE] }));
-        return;
-    }
+    res.setHeader("Cross-Origin-Embedder-Policy", "credentialless");
 
     // Route to file
     let filePath;
@@ -53,8 +43,6 @@ const server = createServer((req, res) => {
         filePath = join(ROOT, "crates/stt-wasm", pathname);
     } else if (pathname.startsWith("/mimi-pkg/")) {
         filePath = join(ROOT, "crates/mimi-wasm/pkg", pathname.replace("/mimi-pkg/", ""));
-    } else if (pathname.startsWith("/models/")) {
-        filePath = join(ROOT, pathname);
     } else {
         filePath = join(ROOT, "web", pathname);
     }
@@ -98,5 +86,5 @@ const server = createServer((req, res) => {
 server.listen(PORT, "0.0.0.0", () => {
     console.log(`\nSTT dev server running:`);
     console.log(`  Local:   http://localhost:${PORT}`);
-    console.log(`\nModel: ${MODEL_FILE}\n`);
+    console.log(`\nModel weights fetched from HuggingFace at runtime.\n`);
 });
