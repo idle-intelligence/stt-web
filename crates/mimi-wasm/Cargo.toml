@@ -28,6 +28,7 @@ byteorder = { workspace = true }
 safetensors = "0.5"
 ndarray = "0.16"
 num-traits = "0.2"
+half = "2"
 
 # WASM support (optional)
 wasm-bindgen = { workspace = true, optional = true }
