@@ -3,10 +3,9 @@
 use crate::MimiError;
 use ndarray::{Array1, Array2, Array3};
 use safetensors::SafeTensors;
-use std::collections::HashMap;
 
 /// Parse a safetensors file and extract tensors.
-pub fn load_safetensors(data: &[u8]) -> Result<SafeTensors, MimiError> {
+pub fn load_safetensors(data: &[u8]) -> Result<SafeTensors<'_>, MimiError> {
     SafeTensors::deserialize(data).map_err(|e| MimiError::WeightLoad(e.to_string()))
 }
 

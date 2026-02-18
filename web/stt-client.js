@@ -111,25 +111,31 @@ export class SttClient {
         // Create worklet node
         this.workletNode = new AudioWorkletNode(this.audioContext, 'audio-processor');
 
-        // Forward audio chunks from worklet to worker.
-        this.workletNode.port.onmessage = (e) => {
-            if (e.data.type === 'audio') {
-                this.worker.postMessage(
-                    { type: 'audio', samples: e.data.samples },
-                    [e.data.samples.buffer]
-                );
-            }
-        };
+        // Create a direct AudioWorklet → Worker channel.
+        // This bypasses the main thread, preventing Chrome from throttling
+        // audio delivery when the tab is in the background.
+        const channel = new MessageChannel();
+        this.workletNode.port.postMessage(
+            { type: 'port', port: channel.port1 },
+            [channel.port1]
+        );
+        this.worker.postMessage(
+            { type: 'audio-port', port: channel.port2 },
+            [channel.port2]
+        );
 
         // Connect mic → worklet → destination.
         // Web Audio API is pull-based: the destination pulls audio from its inputs
         // recursively. Without connecting the worklet to the destination, Chrome
         // will not call process() on the worklet and no audio is captured.
-        // The worklet doesn't write to its output buffer, so only silence reaches
-        // the speakers.
         const source = this.audioContext.createMediaStreamSource(this.mediaStream);
         source.connect(this.workletNode);
         this.workletNode.connect(this.audioContext.destination);
+
+        // NOTE: Background tab throttling (macOS App Nap / Chrome CPU deprioritization)
+        // causes ~2-4x RTF degradation when the tab is on another desktop.
+        // Audio keep-alive tricks interfere with the mic. A SharedWorker architecture
+        // would be needed to fully solve this.
     }
 
     /** Stop recording and flush remaining text. */

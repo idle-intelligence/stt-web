@@ -200,7 +200,7 @@ fn test_e2e_wav_to_text() {
         let model = parts.finalize(&device).unwrap();
         println!("STT model loaded.");
 
-        let mut stream = SttStream::new(config.clone(), config.num_layers);
+        let mut stream = SttStream::new(config.clone(), model.create_cache());
         let mut all_tokens: Vec<u32> = Vec::new();
 
         let stt_start = std::time::Instant::now();
@@ -310,7 +310,7 @@ fn test_e2e_wav_bria() {
         drop(loader);
         let model = parts.finalize(&device).unwrap();
 
-        let mut stream = SttStream::new(config.clone(), config.num_layers);
+        let mut stream = SttStream::new(config.clone(), model.create_cache());
         let mut all_tokens: Vec<u32> = Vec::new();
 
         println!("Running STT on {} frames...", num_frames);
@@ -396,7 +396,7 @@ fn test_e2e_streaming() {
         let parts = loader.load_deferred(&device, &config).unwrap();
         drop(loader);
         let model = parts.finalize(&device).unwrap();
-        let mut stream = SttStream::new(config.clone(), config.num_layers);
+        let mut stream = SttStream::new(config.clone(), model.create_cache());
 
         // === Stream audio in browser-sized chunks ===
         // Browser AudioWorklet sends 1920 samples (80ms at 24kHz)
@@ -514,7 +514,7 @@ fn test_e2e_streaming_bria() {
         let parts = loader.load_deferred(&device, &config).unwrap();
         drop(loader);
         let model = parts.finalize(&device).unwrap();
-        let mut stream = SttStream::new(config.clone(), config.num_layers);
+        let mut stream = SttStream::new(config.clone(), model.create_cache());
 
         // === Stream audio in browser-sized chunks ===
         let chunk_size = 2400; // 100ms at 24kHz (file upload mode)
@@ -649,7 +649,7 @@ fn test_profiling_all() {
             // Fresh Mimi + STT stream
             let mut mimi = mimi_wasm::MimiCodec::new(mimi_weights_path).await
                 .expect("Failed to create Mimi codec");
-            let mut stream = SttStream::new(config.clone(), config.num_layers);
+            let mut stream = SttStream::new(config.clone(), model.create_cache());
 
             let chunk_size = 2400;
             let num_codebooks = config.num_codebooks;

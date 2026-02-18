@@ -60,8 +60,8 @@ fn test_streaming_with_reference_tokens() {
     let model = parts.finalize(&device).unwrap();
     println!("Model loaded.");
 
-    // Create streaming state
-    let mut stream = SttStream::new(config.clone(), config.num_layers);
+    // Create streaming state with pre-allocated KV cache
+    let mut stream = SttStream::new(config.clone(), model.create_cache());
 
     // Feed first 50 frames and collect predicted tokens
     let num_frames = 50.min(mimi_data.tokens.len());

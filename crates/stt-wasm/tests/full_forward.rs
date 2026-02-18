@@ -3,11 +3,9 @@
 //! Loads the actual model, runs multiple forward steps with different tokens,
 //! and checks if the output logits vary.
 
-use burn::backend::wgpu::{Wgpu, WgpuDevice};
-use burn::tensor::Tensor;
+use burn::backend::wgpu::WgpuDevice;
 
 use stt_wasm::gguf::Q4ModelLoader;
-use stt_wasm::model::LayerCaches;
 use stt_wasm::SttConfig;
 
 fn device() -> WgpuDevice {
@@ -35,7 +33,7 @@ fn test_forward_produces_varying_logits() {
     println!("Model loaded: {} layers", config.num_layers);
 
     // Create cache
-    let mut cache = LayerCaches::new(config.num_layers);
+    let mut cache = model.create_cache();
 
     // Run several forward steps with different audio tokens
     let test_frames: Vec<Vec<u32>> = vec![
@@ -114,8 +112,8 @@ fn test_forward_no_cache_varying() {
     let frame2: Vec<u32> = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
          17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32];
 
-    let mut cache1 = LayerCaches::new(config.num_layers);
-    let mut cache2 = LayerCaches::new(config.num_layers);
+    let mut cache1 = model.create_cache();
+    let mut cache2 = model.create_cache();
 
     let logits1: Vec<f32> = model
         .forward(&frame1, config.text_padding_id, &mut cache1)

@@ -433,7 +433,7 @@ impl Q4Tensor {
         let client = WgpuRuntime::client(device);
 
         // Pad to 4-byte alignment for array<u32> access in the WGSL shader.
-        let padded = if raw_bytes.len() % 4 != 0 {
+        let padded = if !raw_bytes.len().is_multiple_of(4) {
             let pad = 4 - (raw_bytes.len() % 4);
             let mut buf = raw_bytes.to_vec();
             buf.resize(raw_bytes.len() + pad, 0);

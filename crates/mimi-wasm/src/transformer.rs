@@ -2,6 +2,11 @@
 //!
 //! 8 layers, 8 heads, 512 dim, causal, with RoPE positional embeddings.
 
+// Performance-critical inner loops use index-based iteration for clarity
+// and to allow multi-array access with the same index variable.
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::excessive_precision)]
+
 use crate::tensor::Tensor3;
 use ndarray::{Array1, Array2, Array3, Axis};
 
@@ -14,14 +19,20 @@ pub struct MultiHeadAttention {
     pub k_proj: Array2<f32>, // (d_model, d_model)
     pub v_proj: Array2<f32>, // (d_model, d_model)
     pub o_proj: Array2<f32>, // (d_model, d_model)
+    // Pre-transposed O projection for streaming: (d_model, d_model), contiguous
+    o_proj_t: Array2<f32>,
     // Fused QKV projection: (3*d_model, d_model) — single matmul instead of 3
     qkv_proj: Array2<f32>,
+    // Pre-transposed fused QKV: (d_model, 3*d_model), contiguous
+    qkv_proj_t: Array2<f32>,
     // Pre-allocated KV cache for streaming (avoids per-step allocation)
     k_cache: Array3<f32>,   // (num_heads, MAX_CONTEXT, head_dim)
     v_cache: Array3<f32>,   // (num_heads, MAX_CONTEXT, head_dim)
     cache_len: usize,       // number of valid entries in cache
     // Pre-computed inverse frequencies for RoPE
     inv_freq: Vec<f32>,
+    // Pre-allocated scratch buffers for streaming step (avoid per-call allocations)
+    scratch_scores: Vec<f32>,   // reusable scores buffer (capacity grows as needed)
 }
 
 impl MultiHeadAttention {
@@ -59,6 +70,10 @@ impl MultiHeadAttention {
         qkv_s[d * d..2 * d * d].copy_from_slice(k_s);
         qkv_s[2 * d * d..3 * d * d].copy_from_slice(v_s);
 
+        // Pre-transpose projections for dot products (avoids per-call .t())
+        let qkv_proj_t = qkv_proj.t().to_owned();
+        let o_proj_t = o_proj.t().to_owned();
+
         Self {
             num_heads,
             head_dim,
@@ -66,11 +81,14 @@ impl MultiHeadAttention {
             k_proj,
             v_proj,
             o_proj,
+            o_proj_t,
             qkv_proj,
+            qkv_proj_t,
             k_cache,
             v_cache,
             cache_len: 0,
             inv_freq,
+            scratch_scores: Vec::with_capacity(Self::MAX_CONTEXT),
         }
     }
 
@@ -276,11 +294,10 @@ impl MultiHeadAttention {
         let head_dim = self.head_dim;
         let half_dim = head_dim / 2;
 
-        // 1. Transpose input: (B, C, T) → (B, T, C)
-        let xt = x.transpose_12();
-
-        // 2. Fused QKV projection: one matmul instead of three
-        let qkv_proj_t = self.qkv_proj.t(); // (d_model, 3*d_model)
+        // 1. Fused QKV projection with inline transpose
+        //    Input is (B, d_model, T) — we need (B, T, d_model) for matmul.
+        //    For streaming (batch=1, T=1-2), do matvec directly from BCT layout
+        //    to avoid allocating a transposed intermediate.
 
         let mut q = Array3::<f32>::zeros((num_heads, new_seq_len, head_dim));
 
@@ -328,33 +345,72 @@ impl MultiHeadAttention {
             let k_cache_s = self.k_cache.as_slice_mut().unwrap();
             let v_cache_s = self.v_cache.as_slice_mut().unwrap();
             let cache_row_stride = Self::MAX_CONTEXT * head_dim;
+            let x_s = x.data.as_slice().unwrap();
+            let d3 = 3 * d_model;
 
-            for b in 0..batch {
-                let bt_slice = xt.data.index_axis(Axis(0), b); // (T, d_model)
+            if new_seq_len <= 2 {
+                // Streaming fast path: extract contiguous x_vec, use ndarray dot (SIMD).
+                let mut x_vec = Array1::<f32>::zeros(d_model);
 
-                // Single fused QKV projection: (T, d_model) @ (d_model, 3*d_model) → (T, 3*d_model)
-                let qkv_all = bt_slice.dot(&qkv_proj_t);
-                let qkv_s = qkv_all.as_slice().unwrap();
-                let d3 = 3 * d_model;
-
-                for h in 0..num_heads {
-                    let q_bh_off = h * new_seq_len * head_dim;
-                    let h_off = h * head_dim;
-                    let cache_h_base = h * cache_row_stride;
-
+                for b in 0..batch {
+                    let b_off = b * d_model * new_seq_len;
                     for t in 0..new_seq_len {
-                        let t_base = t * d3;
-                        // Q: first d_model elements
-                        let q_dst = q_bh_off + t * head_dim;
-                        q_slice[q_dst..q_dst + head_dim]
-                            .copy_from_slice(&qkv_s[t_base + h_off..t_base + h_off + head_dim]);
-                        // K: second d_model elements
-                        let cache_dst = cache_h_base + (cache_write_pos + t) * head_dim;
-                        k_cache_s[cache_dst..cache_dst + head_dim]
-                            .copy_from_slice(&qkv_s[t_base + d_model + h_off..t_base + d_model + h_off + head_dim]);
-                        // V: third d_model elements
-                        v_cache_s[cache_dst..cache_dst + head_dim]
-                            .copy_from_slice(&qkv_s[t_base + 2 * d_model + h_off..t_base + 2 * d_model + h_off + head_dim]);
+                        // Extract x_vec from (B, d_model, T) layout
+                        let xv = x_vec.as_slice_mut().unwrap();
+                        for d in 0..d_model {
+                            xv[d] = x_s[b_off + d * new_seq_len + t];
+                        }
+
+                        // Fused QKV projection: (3*d_model, d_model) @ (d_model,)
+                        let qkv_result = self.qkv_proj.dot(&x_vec);
+                        let qkv_s = qkv_result.as_slice().unwrap();
+
+                        // Scatter into Q (local) and K/V (cache)
+                        for h in 0..num_heads {
+                            let h_off = h * head_dim;
+                            let q_dst = h * new_seq_len * head_dim + t * head_dim;
+                            q_slice[q_dst..q_dst + head_dim]
+                                .copy_from_slice(&qkv_s[h_off..h_off + head_dim]);
+                            let cache_dst = h * cache_row_stride + (cache_write_pos + t) * head_dim;
+                            k_cache_s[cache_dst..cache_dst + head_dim]
+                                .copy_from_slice(&qkv_s[d_model + h_off..d_model + h_off + head_dim]);
+                            v_cache_s[cache_dst..cache_dst + head_dim]
+                                .copy_from_slice(&qkv_s[2 * d_model + h_off..2 * d_model + h_off + head_dim]);
+                        }
+                    }
+                }
+            } else {
+                // Batch path: transpose + GEMM
+                for b in 0..batch {
+                    let b_off = b * d_model * new_seq_len;
+                    // Build transposed input: (T, d_model) from (d_model, T)
+                    let mut xt_buf = Array2::<f32>::zeros((new_seq_len, d_model));
+                    let xt_s = xt_buf.as_slice_mut().unwrap();
+                    for t in 0..new_seq_len {
+                        for d in 0..d_model {
+                            xt_s[t * d_model + d] = x_s[b_off + d * new_seq_len + t];
+                        }
+                    }
+
+                    let qkv_all = xt_buf.dot(&self.qkv_proj_t);
+                    let qkv_s = qkv_all.as_slice().unwrap();
+
+                    for h in 0..num_heads {
+                        let q_bh_off = h * new_seq_len * head_dim;
+                        let h_off = h * head_dim;
+                        let cache_h_base = h * cache_row_stride;
+
+                        for t in 0..new_seq_len {
+                            let t_base = t * d3;
+                            let q_dst = q_bh_off + t * head_dim;
+                            q_slice[q_dst..q_dst + head_dim]
+                                .copy_from_slice(&qkv_s[t_base + h_off..t_base + h_off + head_dim]);
+                            let cache_dst = cache_h_base + (cache_write_pos + t) * head_dim;
+                            k_cache_s[cache_dst..cache_dst + head_dim]
+                                .copy_from_slice(&qkv_s[t_base + d_model + h_off..t_base + d_model + h_off + head_dim]);
+                            v_cache_s[cache_dst..cache_dst + head_dim]
+                                .copy_from_slice(&qkv_s[t_base + 2 * d_model + h_off..t_base + 2 * d_model + h_off + head_dim]);
+                        }
                     }
                 }
             }
@@ -401,7 +457,8 @@ impl MultiHeadAttention {
         let cache_row_stride = Self::MAX_CONTEXT * head_dim;
 
         // For small new_seq_len (typically 1-8), do attention inline with raw slices
-        // to avoid allocating scores array via ndarray
+        // to avoid allocating scores array via ndarray.
+        // Reuse scratch_scores buffer to avoid per-query heap allocation.
         let mut attn_out = Array3::<f32>::zeros((num_heads, new_seq_len, head_dim));
         {
             let q_s = q.as_slice().unwrap();
@@ -412,6 +469,13 @@ impl MultiHeadAttention {
             // Causal offset: all cached positions precede new input
             let causal_offset = total_kv_len - new_seq_len;
 
+            // Ensure scratch buffer is large enough (grows once, never shrinks)
+            let max_attend = total_kv_len;
+            if self.scratch_scores.len() < max_attend {
+                self.scratch_scores.resize(max_attend, 0.0);
+            }
+            let scores_buf = &mut self.scratch_scores;
+
             for h in 0..num_heads {
                 let q_h_base = h * new_seq_len * head_dim;
                 let kv_h_base = h * cache_row_stride;
@@ -420,11 +484,6 @@ impl MultiHeadAttention {
                 for qi in 0..new_seq_len {
                     let q_off = q_h_base + qi * head_dim;
                     let attend_len = (causal_offset + qi + 1).min(total_kv_len);
-
-                    // Compute scores: Q[qi] · K[j] for j in 0..attend_len
-                    // Then softmax, then weighted sum with V
-                    // Use a stack-allocated scores buffer for small attend_len
-                    let mut scores_buf = vec![0.0f32; attend_len];
 
                     // Q @ K^T (dot products)
                     let mut max_val = f32::NEG_INFINITY;
@@ -456,6 +515,7 @@ impl MultiHeadAttention {
 
                     // Weighted sum: output[qi] = sum_j scores[j] * V[j]
                     let out_off = out_h_base + qi * head_dim;
+                    // Zero out output for this query position (since attn_out is zeros, this is already done for first use)
                     for j in 0..attend_len {
                         let w = scores_buf[j];
                         if w > 0.0 {
@@ -469,33 +529,61 @@ impl MultiHeadAttention {
             }
         }
 
-        // 5. Reshape: (H, T, D) → (B, T, d_model) and output projection
-        let mut output = Array3::<f32>::zeros((batch, new_seq_len, d_model));
-        let attn_s = attn_out.as_slice().unwrap();
-        let out_s = output.as_slice_mut().unwrap();
-        for h in 0..num_heads {
-            let src_h_off = h * new_seq_len * head_dim;
-            let h_off = h * head_dim;
-            for t in 0..new_seq_len {
-                let src_off = src_h_off + t * head_dim;
-                let dst_off = t * d_model + h_off;
-                out_s[dst_off..dst_off + head_dim]
-                    .copy_from_slice(&attn_s[src_off..src_off + head_dim]);
-            }
-        }
-
-        // Output projection: (B, T, d_model) @ o_proj.T → (B, d_model, T)
-        let o_proj_t = self.o_proj.t();
+        // 5. Reshape (H, T, D) → (B, T, d_model) and output projection → (B, d_model, T)
+        //    Fused into a single step to minimize intermediate allocations.
         let mut result_bct = Array3::<f32>::zeros((batch, d_model, new_seq_len));
-        for b in 0..batch {
-            let proj_result = output.index_axis(Axis(0), b).dot(&o_proj_t);
-            let src = proj_result.as_slice().unwrap();
-            let dst = result_bct.as_slice_mut().unwrap();
-            let b_off = b * d_model * new_seq_len;
-            for d in 0..d_model {
-                let d_off = b_off + d * new_seq_len;
+        {
+            let attn_s = attn_out.as_slice().unwrap();
+
+            if new_seq_len <= 2 {
+                // Streaming fast path: gather attention output into contiguous vec,
+                // use ndarray dot (SIMD), scatter to BCT output.
+                let dst = result_bct.as_slice_mut().unwrap();
+                let mut attn_vec = Array1::<f32>::zeros(d_model);
+
                 for t in 0..new_seq_len {
-                    dst[d_off + t] = src[t * d_model + d];
+                    // Gather attention output for this timestep into contiguous array:
+                    // attn_out is (H, T, D): attn_s[h * new_seq_len * head_dim + t * head_dim + d]
+                    let av = attn_vec.as_slice_mut().unwrap();
+                    for h in 0..num_heads {
+                        let src_off = h * new_seq_len * head_dim + t * head_dim;
+                        let dst_off = h * head_dim;
+                        av[dst_off..dst_off + head_dim]
+                            .copy_from_slice(&attn_s[src_off..src_off + head_dim]);
+                    }
+
+                    // o_proj @ attn_vec: SIMD-optimized dot
+                    let proj_result = self.o_proj.dot(&attn_vec);
+                    let r_s = proj_result.as_slice().unwrap();
+
+                    // Write transposed: dst[d * new_seq_len + t]
+                    for d in 0..d_model {
+                        dst[d * new_seq_len + t] = r_s[d];
+                    }
+                }
+            } else {
+                // Batch path
+                let mut output = Array2::<f32>::zeros((new_seq_len, d_model));
+                let out_s = output.as_slice_mut().unwrap();
+                for h in 0..num_heads {
+                    let src_h_off = h * new_seq_len * head_dim;
+                    let h_off = h * head_dim;
+                    for t in 0..new_seq_len {
+                        let src_off = src_h_off + t * head_dim;
+                        let dst_off = t * d_model + h_off;
+                        out_s[dst_off..dst_off + head_dim]
+                            .copy_from_slice(&attn_s[src_off..src_off + head_dim]);
+                    }
+                }
+
+                let proj_result = output.dot(&self.o_proj_t);
+                let src = proj_result.as_slice().unwrap();
+                let dst = result_bct.as_slice_mut().unwrap();
+                for d in 0..d_model {
+                    let d_off = d * new_seq_len;
+                    for t in 0..new_seq_len {
+                        dst[d_off + t] = src[t * d_model + d];
+                    }
                 }
             }
         }
@@ -518,6 +606,8 @@ pub struct FeedForward {
     fc2_t: Array2<f32>,     // (dim_ff, d_model) — pre-transposed, contiguous
     pub bias1: Option<Array1<f32>>,
     pub bias2: Option<Array1<f32>>,
+    // Pre-allocated scratch buffer for streaming matvec (dim_ff)
+    scratch_hidden: Vec<f32>,
 }
 
 impl FeedForward {
@@ -530,10 +620,11 @@ impl FeedForward {
         // Pre-transpose weights so matmuls use contiguous memory
         let fc1_t = fc1.t().to_owned();
         let fc2_t = fc2.t().to_owned();
-        Self { fc1, fc2, fc1_t, fc2_t, bias1, bias2 }
+        let dim_ff = fc1.shape()[0];
+        Self { fc1, fc2, fc1_t, fc2_t, bias1, bias2, scratch_hidden: vec![0.0; dim_ff] }
     }
 
-    pub fn forward(&self, x: &Tensor3) -> Tensor3 {
+    pub fn forward(&mut self, x: &Tensor3) -> Tensor3 {
         let (batch, d_model, time) = x.shape();
         let out_dim = self.fc2.shape()[0];
         let dim_ff = self.fc1.shape()[0];
@@ -543,34 +634,44 @@ impl FeedForward {
 
         for b in 0..batch {
             if time <= 2 {
-                // Streaming path: matvec per timestep (avoids allocating transpose temp)
+                // Streaming path: extract contiguous x_vec, use ndarray dot (SIMD).
+                // Re-uses scratch_hidden buffer for GELU to avoid per-timestep alloc.
                 let src = x.data.as_slice().unwrap();
                 let b_off = b * d_model * time;
+                let hidden = &mut self.scratch_hidden;
+
+                let mut x_vec = Array1::<f32>::zeros(d_model);
 
                 for t in 0..time {
-                    // Extract x_vec from (B, d_model, T) layout
-                    let mut x_vec = Array1::<f32>::zeros(d_model);
+                    // Extract x_vec from (B, d_model, T) layout into contiguous buffer
                     let xv = x_vec.as_slice_mut().unwrap();
                     for d in 0..d_model {
                         xv[d] = src[b_off + d * time + t];
                     }
 
-                    // fc1 @ x_vec: (dim_ff, d_model) @ (d_model,) → (dim_ff,)
-                    let mut hidden = self.fc1.dot(&x_vec);
+                    // fc1 @ x_vec: SIMD-optimized dot, copy result to scratch
+                    let fc1_result = self.fc1.dot(&x_vec);
+                    let fc1_s = fc1_result.as_slice().unwrap();
+                    hidden[..dim_ff].copy_from_slice(fc1_s);
+
+                    // Add bias1
                     if let Some(ref bias) = self.bias1 {
-                        hidden += bias;
+                        let bias_s = bias.as_slice().unwrap();
+                        for j in 0..dim_ff {
+                            hidden[j] += bias_s[j];
+                        }
                     }
 
-                    // GELU activation
+                    // GELU activation (on scratch buffer, no allocation)
                     const GELU_COEFF: f32 = 0.7978845608;
-                    let h_s = hidden.as_slice_mut().unwrap();
-                    for v in h_s.iter_mut() {
+                    for v in hidden[..dim_ff].iter_mut() {
                         let x = *v;
                         *v = x * 0.5 * (1.0 + (GELU_COEFF * (x + 0.044715 * x * x * x)).tanh());
                     }
 
-                    // fc2 @ hidden: (d_model, dim_ff) @ (dim_ff,) → (d_model,)
-                    let result = self.fc2.dot(&hidden);
+                    // fc2 @ hidden: use ndarray dot with view into scratch buffer
+                    let h_view = ndarray::ArrayView1::from(&hidden[..dim_ff]);
+                    let result = self.fc2.dot(&h_view);
                     let r_s = result.as_slice().unwrap();
                     let dst = output.as_slice_mut().unwrap();
                     let ob_off = b * out_dim * time;
@@ -669,10 +770,15 @@ impl LayerNorm {
 
     pub fn forward(&self, x: &Tensor3) -> Tensor3 {
         let (batch, channels, time) = x.shape();
-        let mut out = x.data.clone();
-        let slice = out.as_slice_mut().unwrap();
+        let src = x.data.as_slice().unwrap();
         let w = self.weight.as_slice().unwrap();
         let bias = self.bias.as_slice().unwrap();
+        let inv_channels = 1.0 / channels as f32;
+        let eps = self.eps;
+
+        // Allocate output without cloning (just zeros, faster than clone for large arrays)
+        let mut out = Array3::<f32>::zeros((batch, channels, time));
+        let dst = out.as_slice_mut().unwrap();
 
         // Data layout: [b, c, t] → index = b * channels * time + c * time + t
         for b in 0..batch {
@@ -681,23 +787,23 @@ impl LayerNorm {
                 // Mean over channels (stride = time between channel elements)
                 let mut mean = 0.0f32;
                 for c in 0..channels {
-                    mean += slice[b_off + c * time + t];
+                    mean += src[b_off + c * time + t];
                 }
-                mean /= channels as f32;
+                mean *= inv_channels;
 
                 // Variance over channels
                 let mut var = 0.0f32;
                 for c in 0..channels {
-                    let diff = slice[b_off + c * time + t] - mean;
+                    let diff = src[b_off + c * time + t] - mean;
                     var += diff * diff;
                 }
-                var /= channels as f32;
+                var *= inv_channels;
 
                 // Normalize and apply weight/bias
-                let inv_std = 1.0 / (var + self.eps).sqrt();
+                let inv_std = 1.0 / (var + eps).sqrt();
                 for c in 0..channels {
                     let idx = b_off + c * time + t;
-                    slice[idx] = w[c] * (slice[idx] - mean) * inv_std + bias[c];
+                    dst[idx] = w[c] * (src[idx] - mean) * inv_std + bias[c];
                 }
             }
         }
@@ -720,7 +826,7 @@ pub struct TransformerLayer {
 }
 
 impl TransformerLayer {
-    pub fn forward(&self, x: &Tensor3) -> Tensor3 {
+    pub fn forward(&mut self, x: &Tensor3) -> Tensor3 {
         // norm_first = true: norm -> attn -> scale -> residual -> norm -> ff -> scale -> residual
         let normed = self.norm1.forward(x);
         let mut attn_out = self.attn.forward(&normed);
@@ -771,6 +877,7 @@ impl TransformerLayer {
 #[derive(Clone, Debug)]
 pub struct Transformer {
     pub layers: Vec<TransformerLayer>,
+    #[allow(dead_code)]
     pub d_model: usize,
     /// Current position for RoPE in streaming mode.
     pub position: usize,
@@ -782,13 +889,13 @@ impl Transformer {
     }
 
     /// Forward pass through all layers (non-streaming, full self-attention).
-    pub fn forward(&self, x: &Tensor3) -> Tensor3 {
+    pub fn forward(&mut self, x: &Tensor3) -> Tensor3 {
         if self.layers.is_empty() {
             return x.clone();
         }
 
         let mut x = self.layers[0].forward(x);
-        for layer in &self.layers[1..] {
+        for layer in &mut self.layers[1..] {
             x = layer.forward(&x);
         }
         x

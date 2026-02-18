@@ -2,11 +2,19 @@
 //!
 //! Implements Conv1d with streaming support.
 
+#![allow(
+    clippy::needless_range_loop,
+    clippy::manual_saturating_arithmetic,
+    clippy::implicit_saturating_sub,
+    clippy::manual_div_ceil
+)]
+
 use crate::tensor::Tensor3;
 use ndarray::{Array1, Array2, Array3};
 
 /// 1D convolution layer.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Conv1d {
     /// Weight tensor: (out_channels, in_channels, kernel_size)
     pub weight: Array3<f32>,
@@ -323,7 +331,7 @@ impl Conv1d {
     }
 
     /// Optimized forward pass for 1x1 convolution (no im2col needed).
-    fn forward_1x1(&self, input: &Tensor3, batch: usize, in_c: usize, time: usize, out_c: usize) -> Tensor3 {
+    fn forward_1x1(&self, input: &Tensor3, batch: usize, _in_c: usize, time: usize, out_c: usize) -> Tensor3 {
         let mut output = Array3::<f32>::zeros((batch, out_c, time));
 
         for b in 0..batch {
@@ -497,7 +505,7 @@ impl Conv1d {
         let in_c = self.in_channels;
 
         // Build combined buffer: [left_pad] + [prev_buffer] + [new_input]
-        // Directly into a single contiguous allocation to avoid intermediate clones
+        // Uses a flat Vec<f32> to avoid Array3 allocation overhead
         let buf_time = if self.buffer.is_empty() { 0 } else { self.buffer[0].shape()[1] };
         let pad_time = if !self.left_pad_applied && self.causal {
             self.padding()
@@ -506,10 +514,12 @@ impl Conv1d {
         };
         let (_, _, input_time) = input.shape();
         let total_time = pad_time + buf_time + input_time;
+        let total_elems = in_c * total_time;
 
-        let mut combined_data = Array3::<f32>::zeros((1, in_c, total_time));
+        // Use a flat Vec for the combined buffer (cheaper than Array3::zeros)
+        let mut combined_flat = vec![0.0f32; total_elems];
         {
-            let dst = combined_data.as_slice_mut().unwrap();
+            let dst = &mut combined_flat;
             let mut write_pos = 0;
 
             // Left padding (zeros, already initialized) — just advance position
@@ -525,7 +535,6 @@ impl Conv1d {
                 let buf_2d = &self.buffer[0];
                 let buf_src = buf_2d.as_standard_layout();
                 let buf_slice = buf_src.as_slice().unwrap();
-                // Buffer layout: (in_c, buf_time) — copy per channel
                 for c in 0..in_c {
                     let dst_off = c * total_time + write_pos;
                     let src_off = c * buf_time;
@@ -547,7 +556,6 @@ impl Conv1d {
             }
         }
 
-        let combined = Tensor3::new(combined_data);
         let seq_len = total_time;
         let stride = self.stride;
         let dilation = self.dilation;
@@ -557,27 +565,40 @@ impl Conv1d {
 
         if num_frames == 0 {
             // Not enough data — save everything as buffer
-            let view = combined.data.index_axis(ndarray::Axis(0), 0);
-            self.buffer = vec![view.as_standard_layout().to_owned()];
+            let buf = Array2::from_shape_vec(
+                (in_c, total_time),
+                combined_flat,
+            ).expect("buffer reshape");
+            self.buffer = vec![buf];
             return None;
         }
 
         let offset = num_frames * stride;
         let in_len = (num_frames - 1) * stride + kernel;
 
-        // Split: take [0..in_len] for conv, save [offset..] as buffer
-        let conv_input = combined.slice_time(0, in_len);
+        // Build conv input as Array3 from the flat buffer (just the portion we need)
+        let mut conv_data = Array3::<f32>::zeros((1, in_c, in_len));
+        {
+            let dst = conv_data.as_slice_mut().unwrap();
+            for c in 0..in_c {
+                let src_off = c * seq_len;
+                let dst_off = c * in_len;
+                dst[dst_off..dst_off + in_len]
+                    .copy_from_slice(&combined_flat[src_off..src_off + in_len]);
+            }
+        }
+        let conv_input = Tensor3::new(conv_data);
+
+        // Save remaining as buffer
         if seq_len > offset {
-            // Save remaining as buffer (directly from combined to avoid double-copy)
             let remaining_len = seq_len - offset;
             let mut buf = Array2::<f32>::zeros((in_c, remaining_len));
-            let src = combined.data.as_slice().unwrap();
             let dst = buf.as_slice_mut().unwrap();
             for c in 0..in_c {
                 let src_off = c * seq_len + offset;
                 let dst_off = c * remaining_len;
                 dst[dst_off..dst_off + remaining_len]
-                    .copy_from_slice(&src[src_off..src_off + remaining_len]);
+                    .copy_from_slice(&combined_flat[src_off..src_off + remaining_len]);
             }
             self.buffer = vec![buf];
         } else {

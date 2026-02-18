@@ -70,7 +70,7 @@ fn test_e2e_full_transcript() {
         println!("Model loaded.");
 
         // Create streaming state
-        let mut stream = SttStream::new(config.clone(), config.num_layers);
+        let mut stream = SttStream::new(config.clone(), model.create_cache());
 
         // Feed ALL frames
         let mut predicted_tokens: Vec<u32> = Vec::new();
