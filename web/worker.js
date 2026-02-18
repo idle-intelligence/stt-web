@@ -218,7 +218,7 @@ async function handleLoad(config) {
     engine.loadModel();
 
     // 6. Load Mimi codec weights.
-    const mimiUrl = config.mimiUrl || `${HF_BASE}/mimi.safetensors`;
+    const mimiUrl = config.mimiUrl || `${HF_BASE}/mimi-encoder-f16.safetensors`;
     const mimiBuf = await cachedFetch(mimiUrl, 'Downloading audio codec');
     self.postMessage({ type: 'status', text: 'Loading audio codec...' });
     engine.loadMimi(new Uint8Array(mimiBuf));
