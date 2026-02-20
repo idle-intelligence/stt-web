@@ -335,6 +335,9 @@ async function handleStop() {
 
     self.postMessage({ type: 'transcript', text: '', final: true, rtf });
     totalSamples = 0;
+    // Clear stopped so a subsequent reset+audio sequence isn't blocked.
+    // Normally reset clears this, but defense-in-depth avoids relying on ordering.
+    stopped = false;
     self.postMessage({ type: 'status', text: 'Ready', ready: true });
 }
 

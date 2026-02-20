@@ -429,7 +429,9 @@
                 recordBtn.classList.remove('recording');
                 recordBtn.classList.add('primary');
                 statusDot.classList.remove('recording');
-                updateStatus('ready', 'Ready');
+                updateStatus('loading', 'Flushing...');
+                // Disable until worker confirms flush is done (re-enabled by onStatus ready handler)
+                recordBtn.disabled = true;
             }
         });
 
