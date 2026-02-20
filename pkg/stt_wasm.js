@@ -183,6 +183,10 @@ export class SttEngine {
     }
     /**
      * Reset all state for a new recording session.
+     *
+     * Uses `reset_keep_buffers` for the STT stream to preserve GPU KV cache
+     * allocations from warmup. A full `reset()` drops the GPU tensors, forcing
+     * expensive re-allocation on the first frame of the next recording.
      */
     reset() {
         wasm.sttengine_reset(this.__wbg_ptr);
@@ -620,7 +624,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return wasm_bindgen__convert__closures_____invoke__h95173bb80907f648(a, state0.b, arg0, arg1);
+                        return wasm_bindgen__convert__closures_____invoke__hb5e657e40791b622(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -931,7 +935,7 @@ function __wbg_get_imports() {
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { dtor_idx: 1942, function: Function { arguments: [Externref], shim_idx: 1943, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__hc35f886445ca544b, wasm_bindgen__convert__closures_____invoke__hf97d6e1ddba2df81);
+            const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h89c6deb10213d14a, wasm_bindgen__convert__closures_____invoke__hae609bdb97fd6683);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0) {
@@ -965,12 +969,12 @@ function __wbg_get_imports() {
     };
 }
 
-function wasm_bindgen__convert__closures_____invoke__hf97d6e1ddba2df81(arg0, arg1, arg2) {
-    wasm.wasm_bindgen__convert__closures_____invoke__hf97d6e1ddba2df81(arg0, arg1, arg2);
+function wasm_bindgen__convert__closures_____invoke__hae609bdb97fd6683(arg0, arg1, arg2) {
+    wasm.wasm_bindgen__convert__closures_____invoke__hae609bdb97fd6683(arg0, arg1, arg2);
 }
 
-function wasm_bindgen__convert__closures_____invoke__h95173bb80907f648(arg0, arg1, arg2, arg3) {
-    wasm.wasm_bindgen__convert__closures_____invoke__h95173bb80907f648(arg0, arg1, arg2, arg3);
+function wasm_bindgen__convert__closures_____invoke__hb5e657e40791b622(arg0, arg1, arg2, arg3) {
+    wasm.wasm_bindgen__convert__closures_____invoke__hb5e657e40791b622(arg0, arg1, arg2, arg3);
 }
 
 
