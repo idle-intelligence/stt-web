@@ -295,6 +295,12 @@ async function handleStop() {
 
     logState(`Flushing (${totalSamples} samples = ${(totalSamples/24000).toFixed(1)}s, ${tokenCount} tokens so far)...`);
 
+    // Snapshot timing before flush — flush feeds extra silent frames through
+    // the model to drain the delayed-streams pipeline, which takes ~630ms but
+    // isn't part of the real audio duration.
+    const audioDuration = totalSamples / 24000;
+    const totalTime = (performance.now() - recordingStart) / 1000;
+
     // Flush remaining delayed tokens (returns decoded text)
     const flushText = await engine.flush();
 
@@ -304,10 +310,6 @@ async function handleStop() {
     } else {
         logState('Flush returned empty text');
     }
-
-    // Calculate final RTF and send Rust-side metrics
-    const audioDuration = totalSamples / 24000;
-    const totalTime = (performance.now() - recordingStart) / 1000;
     const rtf = {
         total: totalTime / audioDuration,
         audioDuration,
