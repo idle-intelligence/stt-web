@@ -52,6 +52,12 @@ export class SttClient {
         this._pendingResolve = null;
         this._pendingReject = null;
         this._ready = false;
+
+        // Resolves when the worker finishes flushing after stopRecording().
+        // startRecording() awaits this to prevent the race condition where
+        // the worker's `stopped` flag skips audio from the new session.
+        this._flushResolve = null;
+        this._flushPromise = null;
     }
 
     /** Load model — returns when ready to record. */
@@ -92,6 +98,14 @@ export class SttClient {
             throw new Error('Client not initialized. Call init() first.');
         }
 
+        // Wait for any in-progress flush from the previous stopRecording() call.
+        // Without this, the worker's `stopped` flag may still be true, causing it
+        // to skip audio chunks from this new session.
+        if (this._flushPromise) {
+            await this._flushPromise;
+            this._flushPromise = null;
+        }
+
         // Reset engine state for a clean recording session
         this.worker.postMessage({ type: 'reset' });
 
@@ -108,6 +122,12 @@ export class SttClient {
         // Use the device's default sample rate. The AudioWorklet resamples to 24kHz.
         // Forcing sampleRate: 24000 breaks Firefox when the mic's native rate differs.
         this.audioContext = new AudioContext();
+
+        // Explicitly resume — Firefox and Safari may leave the context suspended
+        // even when created during a user gesture, causing process() to never fire.
+        if (this.audioContext.state === 'suspended') {
+            await this.audioContext.resume();
+        }
 
         // Register AudioWorklet processor
         await this.audioContext.audioWorklet.addModule(this.audioProcessorUrl);
@@ -148,6 +168,13 @@ export class SttClient {
             return;
         }
 
+        // Create a promise that resolves when the worker finishes flushing.
+        // startRecording() awaits this to avoid starting a new session while
+        // the worker is still draining the previous one.
+        this._flushPromise = new Promise((resolve) => {
+            this._flushResolve = resolve;
+        });
+
         // Send stop to worker immediately. The worker's queue drainer will skip
         // any remaining queued audio chunks once it sees 'stop'.
         this.worker.postMessage({ type: 'stop' });
@@ -174,11 +201,12 @@ export class SttClient {
             this.mediaStream = null;
         }
 
-        // Close audio context after a brief delay to let the worklet flush
-        const ctx = this.audioContext;
-        this.audioContext = null;
-        if (ctx) {
-            setTimeout(() => ctx.close(), 200);
+        // Close audio context immediately. The worklet is already disconnected
+        // above, so there's nothing left to flush. Delaying the close caused
+        // race conditions on Firefox/Safari when starting a new recording quickly.
+        if (this.audioContext) {
+            this.audioContext.close();
+            this.audioContext = null;
         }
     }
 
@@ -205,6 +233,11 @@ export class SttClient {
         this._ready = false;
         this._pendingResolve = null;
         this._pendingReject = null;
+        if (this._flushResolve) {
+            this._flushResolve();
+            this._flushResolve = null;
+        }
+        this._flushPromise = null;
     }
 
     /** Check if ready to record. */
@@ -221,11 +254,19 @@ export class SttClient {
             case 'status':
                 this.onStatus(data.text, data.ready || false, data.progress);
 
-                // Resolve init() when ready
-                if (data.ready && this._pendingResolve) {
-                    this._pendingResolve();
-                    this._pendingResolve = null;
-                    this._pendingReject = null;
+                if (data.ready) {
+                    // Resolve init() when ready
+                    if (this._pendingResolve) {
+                        this._pendingResolve();
+                        this._pendingResolve = null;
+                        this._pendingReject = null;
+                    }
+
+                    // Resolve flush promise (worker finished draining after stop)
+                    if (this._flushResolve) {
+                        this._flushResolve();
+                        this._flushResolve = null;
+                    }
                 }
                 break;
 
