@@ -99,15 +99,15 @@ export class SttClient {
         this.mediaStream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 channelCount: 1,
-                sampleRate: 24000,
                 echoCancellation: true,
                 noiseSuppression: true,
                 autoGainControl: true,
             }
         });
 
-        // Create AudioContext at 24kHz (Mimi codec's native rate)
-        this.audioContext = new AudioContext({ sampleRate: 24000 });
+        // Use the device's default sample rate. The AudioWorklet resamples to 24kHz.
+        // Forcing sampleRate: 24000 breaks Firefox when the mic's native rate differs.
+        this.audioContext = new AudioContext();
 
         // Register AudioWorklet processor
         await this.audioContext.audioWorklet.addModule(this.audioProcessorUrl);
