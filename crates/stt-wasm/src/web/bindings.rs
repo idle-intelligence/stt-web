@@ -425,10 +425,14 @@ impl SttEngine {
     }
 
     /// Reset all state for a new recording session.
+    ///
+    /// Uses `reset_keep_buffers` for the STT stream to preserve GPU KV cache
+    /// allocations from warmup. A full `reset()` drops the GPU tensors, forcing
+    /// expensive re-allocation on the first frame of the next recording.
     #[cfg_attr(target_family = "wasm", wasm_bindgen)]
     pub fn reset(&mut self) {
         if let Some(stream) = &mut self.stream {
-            stream.reset();
+            stream.reset_keep_buffers();
         }
         if let Some(mimi) = &mut self.mimi {
             mimi.reset();
