@@ -393,6 +393,8 @@
 
         function makeClient() {
             return new SttClient({
+                workerUrl: './worker.js',
+                audioProcessorUrl: './audio-processor.js',
                 onStatus: (text, ready, progress) => {
                     if (!isRecording && !isProcessingFile && text.startsWith('Processing')) return;
                     if (ready) {
