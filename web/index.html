@@ -3,180 +3,231 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>STT — Browser Speech-to-Text</title>
+    <title>stt-web — idle intelligence</title>
+    <link rel="icon" href="favicon.ico">
+    <link rel="apple-touch-icon" href="apple-touch-icon.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --bg: #fdfdfd;
+            --text: #1a1a1a;
+            --muted: #555;
+            --faint: #999;
+            --border: #ddd;
+            --green: #2d7d46;
+            --yellow: #b58900;
+            --red: #c0392b;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: 'SF Mono', Monaco, Consolas, monospace;
-            max-width: 800px;
+            font-family: 'IBM Plex Sans', -apple-system, sans-serif;
+            max-width: 640px;
             margin: 0 auto;
-            padding: 2rem;
-            color: #111;
-            background: #fafafa;
+            padding: 48px 24px 96px;
+            color: var(--text);
+            background: var(--bg);
+            line-height: 1.5;
+            font-size: 15px;
+        }
+        a { color: var(--text); }
+        a:hover { color: var(--muted); }
+
+        header { margin-bottom: 48px; }
+        .org {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 13px;
+            color: var(--muted);
+            letter-spacing: 0.02em;
+            margin-bottom: 2px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .org img {
+            width: 16px;
+            height: 16px;
+            border-radius: 2px;
         }
         h1 {
-            margin-bottom: 0.5rem;
-            font-size: 2rem;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 24px;
             font-weight: 600;
+            margin-bottom: 8px;
         }
-        .subtitle {
-            margin-bottom: 2rem;
-            color: #666;
-            font-size: 0.95rem;
+        .tagline {
+            color: var(--muted);
+            font-size: 14px;
+            line-height: 1.6;
         }
-        .card {
-            background: #fff;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            padding: 1.5rem;
-            margin-bottom: 1.5rem;
+        .tagline a { text-decoration: underline; color: var(--muted); }
+        .tagline a:hover { color: var(--text); }
+        .repo {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 13px;
+            margin-top: 4px;
         }
-        .card h2 {
-            font-size: 0.85rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            color: #888;
-            margin-bottom: 1rem;
+        .repo a { color: var(--faint); text-decoration: none; }
+        .repo a:hover { color: var(--muted); }
+
+        section {
+            border-top: 1px solid var(--border);
+            padding: 24px 0;
         }
+        section h2 {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px;
+            font-weight: 500;
+            letter-spacing: 0.04em;
+            color: var(--faint);
+            margin-bottom: 12px;
+        }
+        section h2 .sub {
+            font-weight: 400;
+        }
+
         .status {
             display: flex;
             align-items: center;
-            gap: 0.5rem;
-            margin-bottom: 1rem;
-            font-size: 0.9rem;
+            gap: 8px;
+            font-size: 14px;
         }
         .status-dot {
-            width: 8px;
-            height: 8px;
+            width: 6px;
+            height: 6px;
             border-radius: 50%;
-            background: #999;
+            background: var(--faint);
+            flex-shrink: 0;
         }
-        .status-dot.loading { background: #f0ad4e; }
-        .status-dot.ready { background: #5cb85c; }
-        .status-dot.error { background: #d9534f; }
+        .status-dot.loading { background: var(--yellow); }
+        .status-dot.ready { background: var(--green); }
+        .status-dot.error { background: var(--red); }
         .status-dot.recording {
-            background: #d9534f;
+            background: var(--red);
             animation: pulse 1s infinite;
         }
         @keyframes pulse {
             0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
+            50% { opacity: 0.4; }
         }
         .progress {
-            height: 4px;
-            background: #eee;
-            border-radius: 2px;
+            height: 2px;
+            background: var(--border);
+            border-radius: 1px;
             overflow: hidden;
-            margin-bottom: 1rem;
+            margin-top: 12px;
             display: none;
         }
-        .progress.visible {
-            display: block;
-        }
+        .progress.visible { display: block; }
         .progress-bar {
             height: 100%;
-            background: #007aff;
+            background: var(--text);
             width: 0%;
             transition: width 0.3s;
         }
-        .controls {
+        #progressInfo {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px;
+            color: var(--faint);
+            margin-top: 4px;
+        }
+
+        .actions {
             display: flex;
-            gap: 0.5rem;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
         }
         button {
-            font-family: inherit;
-            font-size: 0.95rem;
-            padding: 0.6rem 1.2rem;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 13px;
+            font-weight: 500;
+            padding: 8px 16px;
             cursor: pointer;
-            border: 1px solid #ccc;
-            background: #fff;
-            border-radius: 6px;
-            transition: all 0.15s;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--text);
+            border-radius: 0;
+            transition: border-color 0.15s;
         }
         button:hover:not(:disabled) {
-            background: #f5f5f5;
-            border-color: #999;
+            border-color: var(--text);
         }
         button:disabled {
-            opacity: 0.4;
+            opacity: 0.3;
             cursor: not-allowed;
         }
         button.primary {
-            background: #007aff;
-            color: #fff;
-            border-color: #007aff;
+            background: var(--text);
+            color: var(--bg);
+            border-color: var(--text);
         }
         button.primary:hover:not(:disabled) {
-            background: #0051d5;
-            border-color: #0051d5;
+            background: var(--muted);
+            border-color: var(--muted);
         }
         button.recording {
-            background: #d9534f;
+            background: var(--red);
             color: #fff;
-            border-color: #d9534f;
+            border-color: var(--red);
             animation: pulse 1s infinite;
         }
-        #transcript {
-            margin-top: 0;
-            padding: 1rem;
-            min-height: 200px;
-            border: 1px solid #eee;
-            border-radius: 6px;
-            background: #f9f9f9;
-            white-space: pre-wrap;
-            line-height: 1.6;
-            font-size: 0.95rem;
-            color: #111;
-        }
-        #transcript.empty {
-            color: #999;
-            font-style: italic;
-        }
         button.test-file {
-            font-size: 0.8rem;
-            padding: 0.4rem 0.8rem;
-            background: #f0f0f0;
+            color: var(--muted);
         }
         .info {
-            font-size: 0.85rem;
-            color: #888;
-            margin-top: 0.5rem;
+            font-size: 13px;
+            color: var(--faint);
+            margin-top: 12px;
+        }
+
+        #transcript {
+            padding: 16px;
+            min-height: 160px;
+            border: 1px solid var(--border);
+            white-space: pre-wrap;
+            line-height: 1.6;
+            font-size: 15px;
+            color: var(--text);
+        }
+        #transcript.empty {
+            color: var(--faint);
+            font-style: italic;
         }
         #rtfInfo {
-            font-size: 0.8rem;
-            color: #888;
-            margin-top: 0.5rem;
-            font-family: 'SF Mono', Monaco, Consolas, monospace;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px;
+            color: var(--faint);
+            margin-top: 8px;
             display: none;
         }
-        #metricsCard {
-            display: none;
-        }
+
+        #metricsCard { display: none; }
         .metrics-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
-            gap: 0.75rem;
+            gap: 12px;
         }
-        .metric {
-            text-align: center;
-        }
+        .metric { text-align: center; }
         .metric-value {
-            font-size: 1.1rem;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 16px;
             font-weight: 600;
-            color: #007aff;
         }
         .metric-label {
-            font-size: 0.7rem;
-            color: #999;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 11px;
+            color: var(--faint);
             text-transform: uppercase;
             letter-spacing: 0.04em;
-            margin-top: 0.15rem;
+            margin-top: 2px;
         }
         .streaming-cursor {
             display: inline-block;
             width: 2px;
             height: 1em;
-            background: #007aff;
+            background: var(--text);
             margin-left: 2px;
             vertical-align: text-bottom;
             animation: blink 0.7s infinite;
@@ -185,48 +236,70 @@
             0%, 100% { opacity: 1; }
             50% { opacity: 0; }
         }
+
+        footer {
+            border-top: 1px solid var(--border);
+            padding-top: 24px;
+            margin-top: 24px;
+        }
+        footer a {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 13px;
+            color: var(--faint);
+            text-decoration: none;
+        }
+        footer a:hover { color: var(--muted); }
     </style>
 </head>
 <body>
-    <h1>Speech-to-Text</h1>
-    <p class="subtitle">Client-side speech-to-text (English + French) — runs entirely in your browser via WebGPU.</p>
+    <header>
+        <p class="org"><img src="apple-touch-icon.png" alt="II">idle intelligence</p>
+        <h1>stt-web</h1>
+        <p class="tagline">
+            Quantized to Q4.
+            <a href="https://huggingface.co/kyutai/stt-1b-en_fr">Kyutai STT 1B</a>
+            running client-side via WebGPU using
+            <a href="https://burn.dev">Burn</a>
+        </p>
+        <p class="repo">
+            <a href="https://github.com/idle-intelligence/stt-web">github.com/idle-intelligence/stt-web</a>
+        </p>
+    </header>
 
-    <div class="card">
-        <h2>Status</h2>
+    <section>
+        <h2>status</h2>
         <div class="status">
-            <div class="status-dot" id="statusDot"></div>
+            <span class="status-dot" id="statusDot"></span>
             <span id="statusText">Checking browser support...</span>
         </div>
         <div class="progress" id="progressBar">
             <div class="progress-bar" id="progressFill"></div>
         </div>
-        <p class="info" id="progressInfo"></p>
-    </div>
+        <p id="progressInfo"></p>
+        <div style="margin-top:12px">
+            <button id="downloadBtn" class="primary" style="display:none">Download Model</button>
+        </div>
+    </section>
 
-    <div class="card">
-        <h2>Controls</h2>
-        <div class="controls">
+    <section>
+        <h2>input <span class="sub">· audio</span></h2>
+        <div class="actions">
             <button id="recordBtn" class="primary" disabled>Start Recording</button>
             <button id="fileBtn" disabled>Load WAV File</button>
-            <button id="resetBtn" disabled>Reset</button>
+            <button class="test-file" data-src="test-bria.wav" disabled>Load Example WAV</button>
             <input type="file" id="fileInput" accept=".wav,audio/wav" style="display:none">
         </div>
-        <div class="controls" style="margin-top:0.5rem">
-            <button class="test-file" data-src="test-bria.wav" disabled>bria (EN, 30s)</button>
-            <button class="test-file" data-src="test-crepes-fr.wav" disabled>crepes (FR, 30s)</button>
-            <button class="test-file" data-src="test-loona.wav" disabled>loona (1s)</button>
-        </div>
-        <p class="info">Click Start Recording or load a test file. Audio stays on this device.</p>
-    </div>
+        <p class="info">Audio stays on this device.</p>
+    </section>
 
-    <div class="card">
-        <h2>Transcript</h2>
-        <div id="transcript" class="empty"><span id="transcriptText">Transcript will appear here as you speak...</span><span id="streamingCursor" class="streaming-cursor" style="display:none"></span></div>
+    <section>
+        <h2>output <span class="sub">· transcript</span></h2>
+        <div id="transcript" class="empty"><span id="transcriptText">Transcript will appear here...</span><span id="streamingCursor" class="streaming-cursor" style="display:none"></span></div>
         <div id="rtfInfo"></div>
-    </div>
+    </section>
 
-    <div class="card" id="metricsCard">
-        <h2>Performance</h2>
+    <section id="metricsCard">
+        <h2>performance</h2>
         <div class="metrics-grid">
             <div class="metric">
                 <div class="metric-value" id="metricTtfb">—</div>
@@ -253,12 +326,15 @@
                 <div class="metric-label">STT (ms)</div>
             </div>
         </div>
-    </div>
+    </section>
+
+    <footer>
+        <a href="https://idleintelligence.org">idleintelligence.org</a>
+    </footer>
 
     <script type="module">
         const { SttClient } = await import('./stt-client.js');
 
-        // UI elements
         const statusDot = document.getElementById('statusDot');
         const statusText = document.getElementById('statusText');
         const progressBar = document.getElementById('progressBar');
@@ -271,7 +347,7 @@
         const fileBtn = document.getElementById('fileBtn');
         const fileInput = document.getElementById('fileInput');
         const testFileBtns = document.querySelectorAll('.test-file');
-        const resetBtn = document.getElementById('resetBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
         const metricsCard = document.getElementById('metricsCard');
         const metricTtfb = document.getElementById('metricTtfb');
         const metricFps = document.getElementById('metricFps');
@@ -282,27 +358,14 @@
 
         function updateMetrics(data) {
             metricsCard.style.display = 'block';
-            if (data.ttfb != null && data.ttfb >= 0) {
-                metricTtfb.textContent = data.ttfb.toFixed(0);
-            }
-            if (data.framesPerSec != null) {
-                metricFps.textContent = data.framesPerSec.toFixed(1);
-            }
-            if (data.rtf != null) {
-                metricRtf.textContent = data.rtf.toFixed(2);
-            }
-            if (data.avgFrameMs != null) {
-                metricFrameMs.textContent = data.avgFrameMs.toFixed(1);
-            }
-            if (data.mimiMs != null) {
-                metricMimiMs.textContent = data.mimiMs.toFixed(1);
-            }
-            if (data.sttMs != null) {
-                metricSttMs.textContent = data.sttMs.toFixed(1);
-            }
+            if (data.ttfb != null && data.ttfb >= 0) metricTtfb.textContent = data.ttfb.toFixed(0);
+            if (data.framesPerSec != null) metricFps.textContent = data.framesPerSec.toFixed(1);
+            if (data.rtf != null) metricRtf.textContent = data.rtf.toFixed(2);
+            if (data.avgFrameMs != null) metricFrameMs.textContent = data.avgFrameMs.toFixed(1);
+            if (data.mimiMs != null) metricMimiMs.textContent = data.mimiMs.toFixed(1);
+            if (data.sttMs != null) metricSttMs.textContent = data.sttMs.toFixed(1);
         }
 
-        // State
         let client = null;
         let isRecording = false;
         let isProcessingFile = false;
@@ -318,48 +381,41 @@
             return mb >= 1 ? `${mb.toFixed(1)} MB` : `${(bytes / 1024).toFixed(0)} KB`;
         }
 
-        // Check WebGPU support
-        if (!navigator.gpu) {
-            updateStatus('error', 'WebGPU not supported. Use Chrome or Edge.');
-            statusText.textContent = 'WebGPU not supported in this browser. Please use Chrome or Edge (version 113+).';
-        } else {
-            // Initialize client
-            // Model weights are fetched from HuggingFace by default.
-            // To self-host, override with custom URLs:
-            //   modelUrl: 'https://cdn.example.com/stt-1b-en_fr-q4.gguf',
-            //   mimiUrl: 'https://cdn.example.com/mimi.safetensors',
-            //   tokenizerUrl: 'https://cdn.example.com/tokenizer.model',
-            client = new SttClient({
+        // Check if model is already cached
+        const MODEL_CACHE = 'stt-model-v1';
+        const MODEL_CHECK_URL = 'https://huggingface.co/idle-intelligence/stt-1b-en_fr-q4_0-webgpu/resolve/main/stt-1b-en_fr-q4_0.gguf';
+        async function isModelCached() {
+            try {
+                const cache = await caches.open(MODEL_CACHE);
+                return !!(await cache.match(MODEL_CHECK_URL));
+            } catch { return false; }
+        }
+
+        function makeClient() {
+            return new SttClient({
                 onStatus: (text, ready, progress) => {
-                    // Ignore stale processing status messages after stop
-                    if (!isRecording && !isProcessingFile && text.startsWith('Processing')) {
-                        return;
-                    }
+                    if (!isRecording && !isProcessingFile && text.startsWith('Processing')) return;
                     if (ready) {
                         updateStatus('ready', text);
                         recordBtn.disabled = false;
                         fileBtn.disabled = false;
                         testFileBtns.forEach(b => b.disabled = false);
-                        resetBtn.disabled = false;
                         isProcessingFile = false;
                         progressBar.classList.remove('visible');
                         progressInfo.textContent = '';
+                        downloadBtn.style.display = 'none';
                     } else if (isProcessingFile && text.startsWith('Processing')) {
                         updateStatus('loading', text);
                     } else {
                         updateStatus('loading', text);
-
                         if (progress) {
                             progressBar.classList.add('visible');
-                            const percent = progress.total > 0
-                                ? (progress.loaded / progress.total) * 100
-                                : 0;
+                            const percent = progress.total > 0 ? (progress.loaded / progress.total) * 100 : 0;
                             progressFill.style.width = percent + '%';
                             progressInfo.textContent = `${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}`;
                         }
                     }
                 },
-
                 onTranscript: (text, isFinal, rtf) => {
                     const cursor = document.getElementById('streamingCursor');
                     if (text) {
@@ -367,11 +423,9 @@
                         transcriptTextEl.textContent = transcriptText;
                         transcriptEl.classList.remove('empty');
                     }
-
                     if (isFinal) {
                         if (transcriptText) transcriptText += ' ';
                         if (cursor) cursor.style.display = 'none';
-
                         if (rtf) {
                             const procTime = (rtf.audioDuration * rtf.total).toFixed(1);
                             const speedup = (1 / rtf.total).toFixed(1);
@@ -383,32 +437,44 @@
                         if (cursor) cursor.style.display = 'inline-block';
                     }
                 },
-
-                onMetrics: (data) => {
-                    updateMetrics(data);
-                },
-
+                onMetrics: (data) => updateMetrics(data),
                 onError: (err) => {
                     updateStatus('error', 'Error: ' + err.message);
                     console.error(err);
                 }
             });
-
-            // Initialize and load model
-            (async () => {
-                try {
-                    await client.init();
-                } catch (err) {
-                    updateStatus('error', 'Failed to initialize: ' + err.message);
-                    console.error(err);
-                }
-            })();
         }
 
-        // Record button
+        async function initClient() {
+            try {
+                await client.init();
+            } catch (err) {
+                updateStatus('error', 'Failed to initialize: ' + err.message);
+                downloadBtn.style.display = '';
+                downloadBtn.disabled = false;
+                console.error(err);
+            }
+        }
+
+        if (!navigator.gpu) {
+            updateStatus('error', 'WebGPU not supported. Use Chrome or Edge 113+.');
+        } else {
+            client = makeClient();
+            const cached = await isModelCached();
+            if (cached) {
+                await initClient();
+            } else {
+                updateStatus('', 'Model not downloaded');
+                downloadBtn.style.display = '';
+                downloadBtn.addEventListener('click', async () => {
+                    downloadBtn.disabled = true;
+                    await initClient();
+                });
+            }
+        }
+
         recordBtn.addEventListener('click', async () => {
             if (!isRecording) {
-                // Start recording
                 try {
                     await client.startRecording();
                     isRecording = true;
@@ -422,7 +488,6 @@
                     console.error(err);
                 }
             } else {
-                // Stop recording
                 client.stopRecording();
                 isRecording = false;
                 recordBtn.textContent = 'Start Recording';
@@ -430,25 +495,19 @@
                 recordBtn.classList.add('primary');
                 statusDot.classList.remove('recording');
                 updateStatus('loading', 'Flushing...');
-                // Disable until worker confirms flush is done (re-enabled by onStatus ready handler)
                 recordBtn.disabled = true;
             }
         });
 
-        // Shared: decode audio and feed to worker
         async function feedAudioFile(arrayBuf, label) {
             updateStatus('loading', `Decoding ${label}...`);
             fileBtn.disabled = true;
             recordBtn.disabled = true;
             testFileBtns.forEach(b => b.disabled = true);
             isProcessingFile = true;
-
             try {
-                // Decode to 24kHz mono (Mimi's native rate)
                 const offlineCtx = new OfflineAudioContext(1, 1, 24000);
                 const audioBuf = await offlineCtx.decodeAudioData(arrayBuf);
-
-                // Resample to 24kHz mono
                 const duration = audioBuf.duration;
                 const outLen = Math.ceil(duration * 24000);
                 const resampleCtx = new OfflineAudioContext(1, outLen, 24000);
@@ -458,31 +517,17 @@
                 source.start(0);
                 const rendered = await resampleCtx.startRendering();
                 const pcm = rendered.getChannelData(0);
-
-                // Reset state before feeding
-                // Note: posting directly to client.worker to use transferable buffers
-                // for zero-copy audio transfer, bypassing SttClient's wrapper.
                 client.worker.postMessage({ type: 'reset' });
                 transcriptText = '';
                 transcriptTextEl.textContent = '';
                 transcriptEl.classList.remove('empty');
-
-                // Feed in ~100ms chunks (2400 samples)
                 const CHUNK = 2400;
                 updateStatus('loading', `Processing ${(pcm.length/24000).toFixed(1)}s of audio...`);
                 for (let i = 0; i < pcm.length; i += CHUNK) {
                     const chunk = pcm.slice(i, Math.min(i + CHUNK, pcm.length));
-                    client.worker.postMessage(
-                        { type: 'audio', samples: chunk },
-                        [chunk.buffer]
-                    );
-                    // Yield to let worker process and UI update
-                    if (i % (CHUNK * 10) === 0) {
-                        await new Promise(r => setTimeout(r, 0));
-                    }
+                    client.worker.postMessage({ type: 'audio', samples: chunk }, [chunk.buffer]);
+                    if (i % (CHUNK * 10) === 0) await new Promise(r => setTimeout(r, 0));
                 }
-
-                // Flush remaining tokens — "Done" status comes from worker via onStatus('Ready')
                 client.worker.postMessage({ type: 'stop' });
             } catch (err) {
                 updateStatus('error', 'File error: ' + err.message);
@@ -494,7 +539,6 @@
             }
         }
 
-        // File picker button
         fileBtn.addEventListener('click', () => fileInput.click());
         fileInput.addEventListener('change', async (e) => {
             const file = e.target.files[0];
@@ -503,37 +547,15 @@
             await feedAudioFile(await file.arrayBuffer(), file.name);
         });
 
-        // Test file buttons — fetch from server and feed
         testFileBtns.forEach(btn => {
             btn.addEventListener('click', async () => {
                 const src = btn.dataset.src;
                 const resp = await fetch(src);
-                if (!resp.ok) {
-                    updateStatus('error', `Failed to fetch ${src}`);
-                    return;
-                }
+                if (!resp.ok) { updateStatus('error', `Failed to fetch ${src}`); return; }
                 await feedAudioFile(await resp.arrayBuffer(), src);
             });
         });
 
-        // Reset button
-        resetBtn.addEventListener('click', () => {
-            transcriptText = '';
-            transcriptTextEl.textContent = 'Transcript will appear here as you speak...';
-            transcriptEl.classList.add('empty');
-            document.getElementById('streamingCursor').style.display = 'none';
-            rtfInfoEl.style.display = 'none';
-            rtfInfoEl.textContent = '';
-            metricsCard.style.display = 'none';
-            metricTtfb.textContent = '—';
-            metricFps.textContent = '—';
-            metricRtf.textContent = '—';
-            metricFrameMs.textContent = '—';
-            metricMimiMs.textContent = '—';
-            metricSttMs.textContent = '—';
-            client.reset();
-            updateStatus('ready', 'Ready');
-        });
     </script>
 </body>
 </html>

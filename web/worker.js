@@ -188,8 +188,10 @@ async function handleLoad(config) {
 
     // 1. Import WASM module.
     self.postMessage({ type: 'status', text: 'Loading WASM module...' });
-    sttWasm = await import(base + '/pkg/stt_wasm.js');
-    await sttWasm.default(base + '/pkg/stt_wasm_bg.wasm');
+    const wasmJsUrl = base ? (base + '/pkg/stt_wasm.js') : new URL('../pkg/stt_wasm.js', import.meta.url).href;
+    const wasmBgUrl = base ? (base + '/pkg/stt_wasm_bg.wasm') : new URL('../pkg/stt_wasm_bg.wasm', import.meta.url).href;
+    sttWasm = await import(wasmJsUrl);
+    await sttWasm.default(wasmBgUrl);
 
     // 2. Initialize WebGPU device.
     self.postMessage({ type: 'status', text: 'Initializing WebGPU device...' });

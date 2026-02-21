@@ -2,6 +2,8 @@
 
 Browser-native speech-to-text running 100% client-side via Rust/WASM + WebGPU.
 
+[**Try the demo →**](https://idle-intelligence.github.io/stt-web/web/)
+
 > **Disclaimer:** This is an experimental port. The model weights are Q4-quantized from [kyutai/stt-1b-en_fr](https://huggingface.co/kyutai/stt-1b-en_fr) (CC-BY 4.0). Transcription quality may differ from the original PyTorch implementation. This project is not affiliated with or endorsed by Kyutai Labs.
 
 ## Status
