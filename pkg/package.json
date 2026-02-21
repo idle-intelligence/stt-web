@@ -1,0 +1,17 @@
+{
+  "name": "stt-wasm",
+  "type": "module",
+  "description": "STT 1B transformer in Burn+wgpu — runs natively and in browser via WASM+WebGPU",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "stt_wasm_bg.wasm",
+    "stt_wasm.js",
+    "stt_wasm.d.ts"
+  ],
+  "main": "stt_wasm.js",
+  "types": "stt_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

@@ -1,0 +1,32 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_sttengine_free: (a: number, b: number) => void;
+export const initWgpuDevice: () => any;
+export const sttengine_appendModelShard: (a: number, b: number, c: number) => void;
+export const sttengine_feedAudio: (a: number, b: number, c: number) => any;
+export const sttengine_flush: (a: number) => any;
+export const sttengine_getMetrics: (a: number) => any;
+export const sttengine_isReady: (a: number) => number;
+export const sttengine_loadMimi: (a: number, b: number, c: number) => [number, number];
+export const sttengine_loadModel: (a: number) => [number, number];
+export const sttengine_loadTokenizer: (a: number, b: number, c: number) => [number, number];
+export const sttengine_new: () => number;
+export const sttengine_reset: (a: number) => void;
+export const sttengine_warmup: (a: number) => any;
+export const start: () => void;
+export const __wbg_mimicodec_free: (a: number, b: number) => void;
+export const mimicodec_feedAudio: (a: number, b: number, c: number) => [number, number];
+export const mimicodec_new: (a: number, b: number) => any;
+export const mimicodec_reset: (a: number) => void;
+export const wasm_bindgen__closure__destroy__h89c6deb10213d14a: (a: number, b: number) => void;
+export const wasm_bindgen__convert__closures_____invoke__hb5e657e40791b622: (a: number, b: number, c: any, d: any) => void;
+export const wasm_bindgen__convert__closures_____invoke__hae609bdb97fd6683: (a: number, b: number, c: any) => void;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_start: () => void;

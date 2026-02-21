@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>stt-web — idle intelligence</title>
+    <link rel="icon" href="favicon.ico">
+    <link rel="apple-touch-icon" href="apple-touch-icon.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #fdfdfd;
+            --text: #1a1a1a;
+            --muted: #555;
+            --faint: #999;
+            --border: #ddd;
+            --green: #2d7d46;
+            --yellow: #b58900;
+            --red: #c0392b;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'IBM Plex Sans', -apple-system, sans-serif;
+            max-width: 640px;
+            margin: 0 auto;
+            padding: 48px 24px 96px;
+            color: var(--text);
+            background: var(--bg);
+            line-height: 1.5;
+            font-size: 15px;
+        }
+        a { color: var(--text); }
+        a:hover { color: var(--muted); }
+
+        header { margin-bottom: 48px; }
+        .org {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 13px;
+            color: var(--muted);
+            letter-spacing: 0.02em;
+            margin-bottom: 2px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .org img {
+            width: 16px;
+            height: 16px;
+            border-radius: 2px;
+        }
+        h1 {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .tagline {
+            color: var(--muted);
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .tagline a { text-decoration: underline; color: var(--muted); }
+        .tagline a:hover { color: var(--text); }
+        .repo {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 13px;
+            margin-top: 4px;
+        }
+        .repo a { color: var(--faint); text-decoration: none; }
+        .repo a:hover { color: var(--muted); }
+
+        section {
+            border-top: 1px solid var(--border);
+            padding: 24px 0;
+        }
+        section h2 {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px;
+            font-weight: 500;
+            letter-spacing: 0.04em;
+            color: var(--faint);
+            margin-bottom: 12px;
+        }
+        section h2 .sub {
+            font-weight: 400;
+        }
+
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+        }
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--faint);
+            flex-shrink: 0;
+        }
+        .status-dot.loading { background: var(--yellow); }
+        .status-dot.ready { background: var(--green); }
+        .status-dot.error { background: var(--red); }
+        .status-dot.recording {
+            background: var(--red);
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        .progress {
+            height: 2px;
+            background: var(--border);
+            border-radius: 1px;
+            overflow: hidden;
+            margin-top: 12px;
+            display: none;
+        }
+        .progress.visible { display: block; }
+        .progress-bar {
+            height: 100%;
+            background: var(--text);
+            width: 0%;
+            transition: width 0.3s;
+        }
+        #progressInfo {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px;
+            color: var(--faint);
+            margin-top: 4px;
+        }
+
+        .actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        button {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 13px;
+            font-weight: 500;
+            padding: 8px 16px;
+            cursor: pointer;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--text);
+            border-radius: 0;
+            transition: border-color 0.15s;
+        }
+        button:hover:not(:disabled) {
+            border-color: var(--text);
+        }
+        button:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+        button.primary {
+            background: var(--text);
+            color: var(--bg);
+            border-color: var(--text);
+        }
+        button.primary:hover:not(:disabled) {
+            background: var(--muted);
+            border-color: var(--muted);
+        }
+        button.recording {
+            background: var(--red);
+            color: #fff;
+            border-color: var(--red);
+            animation: pulse 1s infinite;
+        }
+        button.test-file {
+            color: var(--muted);
+        }
+        .info {
+            font-size: 13px;
+            color: var(--faint);
+            margin-top: 12px;
+        }
+
+        #transcript {
+            padding: 16px;
+            min-height: 160px;
+            border: 1px solid var(--border);
+            white-space: pre-wrap;
+            line-height: 1.6;
+            font-size: 15px;
+            color: var(--text);
+        }
+        #transcript.empty {
+            color: var(--faint);
+            font-style: italic;
+        }
+        #rtfInfo {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px;
+            color: var(--faint);
+            margin-top: 8px;
+            display: none;
+        }
+
+        #metricsCard { display: none; }
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+        .metric { text-align: center; }
+        .metric-value {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 16px;
+            font-weight: 600;
+        }
+        .metric-label {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 11px;
+            color: var(--faint);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin-top: 2px;
+        }
+        .streaming-cursor {
+            display: inline-block;
+            width: 2px;
+            height: 1em;
+            background: var(--text);
+            margin-left: 2px;
+            vertical-align: text-bottom;
+            animation: blink 0.7s infinite;
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+        }
+
+        footer {
+            border-top: 1px solid var(--border);
+            padding-top: 24px;
+            margin-top: 24px;
+        }
+        footer a {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 13px;
+            color: var(--faint);
+            text-decoration: none;
+        }
+        footer a:hover { color: var(--muted); }
+    </style>
+</head>
+<body>
+    <header>
+        <p class="org"><img src="apple-touch-icon.png" alt="II">idle intelligence</p>
+        <h1>stt-web</h1>
+        <p class="tagline">
+            Quantized to Q4.
+            <a href="https://huggingface.co/kyutai/stt-1b-en_fr">Kyutai STT 1B</a>
+            running client-side via WebGPU using
+            <a href="https://burn.dev">Burn</a>
+        </p>
+        <p class="repo">
+            <a href="https://github.com/idle-intelligence/stt-web">github.com/idle-intelligence/stt-web</a>
+        </p>
+    </header>
+
+    <section>
+        <h2>status</h2>
+        <div class="status">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">Checking browser support...</span>
+        </div>
+        <div class="progress" id="progressBar">
+            <div class="progress-bar" id="progressFill"></div>
+        </div>
+        <p id="progressInfo"></p>
+        <div style="margin-top:12px">
+            <button id="downloadBtn" class="primary" style="display:none">Download Model</button>
+        </div>
+    </section>
+
+    <section>
+        <h2>input <span class="sub">· audio</span></h2>
+        <div class="actions">
+            <button id="recordBtn" class="primary" disabled>Start Recording</button>
+            <button id="fileBtn" disabled>Load WAV File</button>
+            <button class="test-file" data-src="test-bria.wav" disabled>Load Example WAV</button>
+            <input type="file" id="fileInput" accept=".wav,audio/wav" style="display:none">
+        </div>
+        <p class="info">Audio stays on this device.</p>
+    </section>
+
+    <section>
+        <h2>output <span class="sub">· transcript</span></h2>
+        <div id="transcript" class="empty"><span id="transcriptText">Transcript will appear here...</span><span id="streamingCursor" class="streaming-cursor" style="display:none"></span></div>
+        <div id="rtfInfo"></div>
+    </section>
+
+    <section id="metricsCard">
+        <h2>performance</h2>
+        <div class="metrics-grid">
+            <div class="metric">
+                <div class="metric-value" id="metricTtfb">—</div>
+                <div class="metric-label">TTFB (ms)</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value" id="metricFps">—</div>
+                <div class="metric-label">Frames/sec</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value" id="metricRtf">—</div>
+                <div class="metric-label">RTF</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value" id="metricFrameMs">—</div>
+                <div class="metric-label">ms/frame</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value" id="metricMimiMs">—</div>
+                <div class="metric-label">Mimi (ms)</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value" id="metricSttMs">—</div>
+                <div class="metric-label">STT (ms)</div>
+            </div>
+        </div>
+    </section>
+
+    <footer>
+        <a href="https://idleintelligence.org">idleintelligence.org</a>
+    </footer>
+
+    <script type="module">
+        const { SttClient } = await import('./stt-client.js');
+
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const progressBar = document.getElementById('progressBar');
+        const progressFill = document.getElementById('progressFill');
+        const progressInfo = document.getElementById('progressInfo');
+        const transcriptEl = document.getElementById('transcript');
+        const transcriptTextEl = document.getElementById('transcriptText');
+        const rtfInfoEl = document.getElementById('rtfInfo');
+        const recordBtn = document.getElementById('recordBtn');
+        const fileBtn = document.getElementById('fileBtn');
+        const fileInput = document.getElementById('fileInput');
+        const testFileBtns = document.querySelectorAll('.test-file');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const metricsCard = document.getElementById('metricsCard');
+        const metricTtfb = document.getElementById('metricTtfb');
+        const metricFps = document.getElementById('metricFps');
+        const metricRtf = document.getElementById('metricRtf');
+        const metricFrameMs = document.getElementById('metricFrameMs');
+        const metricMimiMs = document.getElementById('metricMimiMs');
+        const metricSttMs = document.getElementById('metricSttMs');
+
+        function updateMetrics(data) {
+            metricsCard.style.display = 'block';
+            if (data.ttfb != null && data.ttfb >= 0) metricTtfb.textContent = data.ttfb.toFixed(0);
+            if (data.framesPerSec != null) metricFps.textContent = data.framesPerSec.toFixed(1);
+            if (data.rtf != null) metricRtf.textContent = data.rtf.toFixed(2);
+            if (data.avgFrameMs != null) metricFrameMs.textContent = data.avgFrameMs.toFixed(1);
+            if (data.mimiMs != null) metricMimiMs.textContent = data.mimiMs.toFixed(1);
+            if (data.sttMs != null) metricSttMs.textContent = data.sttMs.toFixed(1);
+        }
+
+        let client = null;
+        let isRecording = false;
+        let isProcessingFile = false;
+        let transcriptText = '';
+
+        function updateStatus(state, text) {
+            statusDot.className = 'status-dot ' + state;
+            statusText.textContent = text;
+        }
+
+        function formatBytes(bytes) {
+            const mb = bytes / (1024 * 1024);
+            return mb >= 1 ? `${mb.toFixed(1)} MB` : `${(bytes / 1024).toFixed(0)} KB`;
+        }
+
+        // Check if model is already cached
+        const MODEL_CACHE = 'stt-model-v1';
+        const MODEL_CHECK_URL = 'https://huggingface.co/idle-intelligence/stt-1b-en_fr-q4_0-webgpu/resolve/main/stt-1b-en_fr-q4_0.gguf';
+        async function isModelCached() {
+            try {
+                const cache = await caches.open(MODEL_CACHE);
+                return !!(await cache.match(MODEL_CHECK_URL));
+            } catch { return false; }
+        }
+
+        function makeClient() {
+            return new SttClient({
+                onStatus: (text, ready, progress) => {
+                    if (!isRecording && !isProcessingFile && text.startsWith('Processing')) return;
+                    if (ready) {
+                        updateStatus('ready', text);
+                        recordBtn.disabled = false;
+                        fileBtn.disabled = false;
+                        testFileBtns.forEach(b => b.disabled = false);
+                        isProcessingFile = false;
+                        progressBar.classList.remove('visible');
+                        progressInfo.textContent = '';
+                        downloadBtn.style.display = 'none';
+                    } else if (isProcessingFile && text.startsWith('Processing')) {
+                        updateStatus('loading', text);
+                    } else {
+                        updateStatus('loading', text);
+                        if (progress) {
+                            progressBar.classList.add('visible');
+                            const percent = progress.total > 0 ? (progress.loaded / progress.total) * 100 : 0;
+                            progressFill.style.width = percent + '%';
+                            progressInfo.textContent = `${formatBytes(progress.loaded)} / ${formatBytes(progress.total)}`;
+                        }
+                    }
+                },
+                onTranscript: (text, isFinal, rtf) => {
+                    const cursor = document.getElementById('streamingCursor');
+                    if (text) {
+                        transcriptText += text;
+                        transcriptTextEl.textContent = transcriptText;
+                        transcriptEl.classList.remove('empty');
+                    }
+                    if (isFinal) {
+                        if (transcriptText) transcriptText += ' ';
+                        if (cursor) cursor.style.display = 'none';
+                        if (rtf) {
+                            const procTime = (rtf.audioDuration * rtf.total).toFixed(1);
+                            const speedup = (1 / rtf.total).toFixed(1);
+                            const faster = rtf.total < 1.0 ? ` — ${speedup}x faster than real-time` : '';
+                            rtfInfoEl.textContent = `${rtf.audioDuration.toFixed(1)}s audio processed in ${procTime}s (RTF: ${rtf.total.toFixed(2)}x)${faster}`;
+                            rtfInfoEl.style.display = 'block';
+                        }
+                    } else {
+                        if (cursor) cursor.style.display = 'inline-block';
+                    }
+                },
+                onMetrics: (data) => updateMetrics(data),
+                onError: (err) => {
+                    updateStatus('error', 'Error: ' + err.message);
+                    console.error(err);
+                }
+            });
+        }
+
+        async function initClient() {
+            try {
+                await client.init();
+            } catch (err) {
+                updateStatus('error', 'Failed to initialize: ' + err.message);
+                downloadBtn.style.display = '';
+                downloadBtn.disabled = false;
+                console.error(err);
+            }
+        }
+
+        if (!navigator.gpu) {
+            updateStatus('error', 'WebGPU not supported. Use Chrome or Edge 113+.');
+        } else {
+            client = makeClient();
+            const cached = await isModelCached();
+            if (cached) {
+                await initClient();
+            } else {
+                updateStatus('', 'Model not downloaded');
+                downloadBtn.style.display = '';
+                downloadBtn.addEventListener('click', async () => {
+                    downloadBtn.disabled = true;
+                    await initClient();
+                });
+            }
+        }
+
+        recordBtn.addEventListener('click', async () => {
+            if (!isRecording) {
+                try {
+                    await client.startRecording();
+                    isRecording = true;
+                    recordBtn.textContent = 'Stop Recording';
+                    recordBtn.classList.add('recording');
+                    recordBtn.classList.remove('primary');
+                    statusDot.classList.add('recording');
+                    updateStatus('recording', 'Recording...');
+                } catch (err) {
+                    updateStatus('error', 'Microphone error: ' + err.message);
+                    console.error(err);
+                }
+            } else {
+                client.stopRecording();
+                isRecording = false;
+                recordBtn.textContent = 'Start Recording';
+                recordBtn.classList.remove('recording');
+                recordBtn.classList.add('primary');
+                statusDot.classList.remove('recording');
+                updateStatus('loading', 'Flushing...');
+                recordBtn.disabled = true;
+            }
+        });
+
+        async function feedAudioFile(arrayBuf, label) {
+            updateStatus('loading', `Decoding ${label}...`);
+            fileBtn.disabled = true;
+            recordBtn.disabled = true;
+            testFileBtns.forEach(b => b.disabled = true);
+            isProcessingFile = true;
+            try {
+                const offlineCtx = new OfflineAudioContext(1, 1, 24000);
+                const audioBuf = await offlineCtx.decodeAudioData(arrayBuf);
+                const duration = audioBuf.duration;
+                const outLen = Math.ceil(duration * 24000);
+                const resampleCtx = new OfflineAudioContext(1, outLen, 24000);
+                const source = resampleCtx.createBufferSource();
+                source.buffer = audioBuf;
+                source.connect(resampleCtx.destination);
+                source.start(0);
+                const rendered = await resampleCtx.startRendering();
+                const pcm = rendered.getChannelData(0);
+                client.worker.postMessage({ type: 'reset' });
+                transcriptText = '';
+                transcriptTextEl.textContent = '';
+                transcriptEl.classList.remove('empty');
+                const CHUNK = 2400;
+                updateStatus('loading', `Processing ${(pcm.length/24000).toFixed(1)}s of audio...`);
+                for (let i = 0; i < pcm.length; i += CHUNK) {
+                    const chunk = pcm.slice(i, Math.min(i + CHUNK, pcm.length));
+                    client.worker.postMessage({ type: 'audio', samples: chunk }, [chunk.buffer]);
+                    if (i % (CHUNK * 10) === 0) await new Promise(r => setTimeout(r, 0));
+                }
+                client.worker.postMessage({ type: 'stop' });
+            } catch (err) {
+                updateStatus('error', 'File error: ' + err.message);
+                console.error(err);
+                isProcessingFile = false;
+                fileBtn.disabled = false;
+                recordBtn.disabled = false;
+                testFileBtns.forEach(b => b.disabled = false);
+            }
+        }
+
+        fileBtn.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            fileInput.value = '';
+            await feedAudioFile(await file.arrayBuffer(), file.name);
+        });
+
+        testFileBtns.forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const src = btn.dataset.src;
+                const resp = await fetch(src);
+                if (!resp.ok) { updateStatus('error', `Failed to fetch ${src}`); return; }
+                await feedAudioFile(await resp.arrayBuffer(), src);
+            });
+        });
+
+    </script>
+</body>
+</html>
