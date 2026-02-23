@@ -1,67 +1,6 @@
 /* @ts-self-types="./stt_wasm.d.ts" */
 
 /**
- * Mimi audio codec instance.
- *
- * Encodes raw PCM audio into 32-codebook token frames at 12.5Hz.
- * Runs entirely on CPU — no GPU required.
- */
-export class MimiCodec {
-    static __wrap(ptr) {
-        ptr = ptr >>> 0;
-        const obj = Object.create(MimiCodec.prototype);
-        obj.__wbg_ptr = ptr;
-        MimiCodecFinalization.register(obj, obj.__wbg_ptr, obj);
-        return obj;
-    }
-    __destroy_into_raw() {
-        const ptr = this.__wbg_ptr;
-        this.__wbg_ptr = 0;
-        MimiCodecFinalization.unregister(this);
-        return ptr;
-    }
-    free() {
-        const ptr = this.__destroy_into_raw();
-        wasm.__wbg_mimicodec_free(ptr, 0);
-    }
-    /**
-     * Feed a chunk of f32 PCM audio (24kHz mono for Mimi).
-     *
-     * Returns token IDs as a flat array:
-     * `[frame0_tok0, frame0_tok1, ..., frame0_tok31, frame1_tok0, ...]`
-     *
-     * May return empty if not enough audio has accumulated for a full frame.
-     * @param {Float32Array} samples
-     * @returns {Uint32Array}
-     */
-    feedAudio(samples) {
-        const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.mimicodec_feedAudio(this.__wbg_ptr, ptr0, len0);
-        var v2 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-        return v2;
-    }
-    /**
-     * Create a new codec instance. Downloads/loads Mimi weights from the given URL.
-     * @param {string} weights_url
-     */
-    constructor(weights_url) {
-        const ptr0 = passStringToWasm0(weights_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.mimicodec_new(ptr0, len0);
-        return ret;
-    }
-    /**
-     * Reset internal state (e.g., when user stops and restarts recording).
-     */
-    reset() {
-        wasm.mimicodec_reset(this.__wbg_ptr);
-    }
-}
-if (Symbol.dispose) MimiCodec.prototype[Symbol.dispose] = MimiCodec.prototype.free;
-
-/**
  * Browser-facing STT engine combining Mimi codec + STT transformer.
  *
  * This is the single entry point that the Web Worker calls.
@@ -137,6 +76,9 @@ export class SttEngine {
     }
     /**
      * Initialize the Mimi audio codec from pre-fetched weight bytes.
+     *
+     * Loads the full Mimi model via mimi-rs (candle), with automatic key
+     * remapping from the standard Mimi safetensors naming convention.
      * @param {Uint8Array} data
      */
     loadMimi(data) {
@@ -281,10 +223,6 @@ function __wbg_get_imports() {
         __wbg__wbg_cb_unref_d9b87ff7982e3b21: function(arg0) {
             arg0._wbg_cb_unref();
         },
-        __wbg_arrayBuffer_bb54076166006c39: function() { return handleError(function (arg0) {
-            const ret = arg0.arrayBuffer();
-            return ret;
-        }, arguments); },
         __wbg_beginComputePass_304dccb30a4db2cc: function(arg0, arg1) {
             const ret = arg0.beginComputePass(arg1);
             return ret;
@@ -382,10 +320,6 @@ function __wbg_get_imports() {
         __wbg_getRandomValues_1c61fac11405ffdc: function() { return handleError(function (arg0, arg1) {
             globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
         }, arguments); },
-        __wbg_get_b3ed3ad4be2bc8ac: function() { return handleError(function (arg0, arg1) {
-            const ret = Reflect.get(arg0, arg1);
-            return ret;
-        }, arguments); },
         __wbg_gpu_a6bce2913fb8f574: function(arg0) {
             const ret = arg0.gpu;
             return ret;
@@ -428,16 +362,6 @@ function __wbg_get_imports() {
             let result;
             try {
                 result = arg0 instanceof Object;
-            } catch (_) {
-                result = false;
-            }
-            const ret = result;
-            return ret;
-        },
-        __wbg_instanceof_Response_ee1d54d79ae41977: function(arg0) {
-            let result;
-            try {
-                result = arg0 instanceof Response;
             } catch (_) {
                 result = false;
             }
@@ -585,10 +509,6 @@ function __wbg_get_imports() {
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
-        __wbg_mimicodec_new: function(arg0) {
-            const ret = MimiCodec.__wrap(arg0);
-            return ret;
-        },
         __wbg_minStorageBufferOffsetAlignment_8150d07a1d4bf231: function(arg0) {
             const ret = arg0.minStorageBufferOffsetAlignment;
             return ret;
@@ -624,7 +544,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return wasm_bindgen__convert__closures_____invoke__hb5e657e40791b622(a, state0.b, arg0, arg1);
+                        return wasm_bindgen__convert__closures_____invoke__h7db53dd6d58c3aad(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -634,10 +554,6 @@ function __wbg_get_imports() {
             } finally {
                 state0.a = state0.b = 0;
             }
-        },
-        __wbg_new_dd2b680c8bf6ae29: function(arg0) {
-            const ret = new Uint8Array(arg0);
-            return ret;
         },
         __wbg_new_from_slice_a3d2629dc1826784: function(arg0, arg1) {
             const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
@@ -934,8 +850,8 @@ function __wbg_get_imports() {
             arg0.writeBuffer(arg1, arg2, arg3, arg4, arg5);
         }, arguments); },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 1942, function: Function { arguments: [Externref], shim_idx: 1943, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h89c6deb10213d14a, wasm_bindgen__convert__closures_____invoke__hae609bdb97fd6683);
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 2326, function: Function { arguments: [Externref], shim_idx: 2327, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h8f7b7643e506c168, wasm_bindgen__convert__closures_____invoke__hd4442bfdfa8e9fb2);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0) {
@@ -969,12 +885,12 @@ function __wbg_get_imports() {
     };
 }
 
-function wasm_bindgen__convert__closures_____invoke__hae609bdb97fd6683(arg0, arg1, arg2) {
-    wasm.wasm_bindgen__convert__closures_____invoke__hae609bdb97fd6683(arg0, arg1, arg2);
+function wasm_bindgen__convert__closures_____invoke__hd4442bfdfa8e9fb2(arg0, arg1, arg2) {
+    wasm.wasm_bindgen__convert__closures_____invoke__hd4442bfdfa8e9fb2(arg0, arg1, arg2);
 }
 
-function wasm_bindgen__convert__closures_____invoke__hb5e657e40791b622(arg0, arg1, arg2, arg3) {
-    wasm.wasm_bindgen__convert__closures_____invoke__hb5e657e40791b622(arg0, arg1, arg2, arg3);
+function wasm_bindgen__convert__closures_____invoke__h7db53dd6d58c3aad(arg0, arg1, arg2, arg3) {
+    wasm.wasm_bindgen__convert__closures_____invoke__h7db53dd6d58c3aad(arg0, arg1, arg2, arg3);
 }
 
 
@@ -1003,9 +919,6 @@ const __wbindgen_enum_GpuTextureSampleType = ["float", "unfilterable-float", "de
 
 
 const __wbindgen_enum_GpuTextureViewDimension = ["1d", "2d", "2d-array", "cube", "cube-array", "3d"];
-const MimiCodecFinalization = (typeof FinalizationRegistry === 'undefined')
-    ? { register: () => {}, unregister: () => {} }
-    : new FinalizationRegistry(ptr => wasm.__wbg_mimicodec_free(ptr >>> 0, 1));
 const SttEngineFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_sttengine_free(ptr >>> 0, 1));
