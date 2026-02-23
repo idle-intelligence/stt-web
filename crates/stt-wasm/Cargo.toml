@@ -24,7 +24,6 @@ wasm = [
     "web-sys",
     "console_error_panic_hook",
     "getrandom/wasm_js",
-    "mimi-wasm/wasm",
 ]
 cli = ["clap", "indicatif"]
 
@@ -35,8 +34,12 @@ hub = ["hf-hub"]
 burn = { workspace = true }
 cubecl = { workspace = true }
 
-# Local crate
-mimi-wasm = { path = "../mimi-wasm", default-features = false }
+# Mimi audio codec (candle-based, shared with tts-web)
+mimi-rs = { git = "https://github.com/idle-intelligence/mimi-rs.git", branch = "feat/rvq-quantizer-streaming-encode" }
+candle-core = "0.9"
+candle-nn = "0.9"
+safetensors = "0.4"
+half = "2"
 
 # Core
 anyhow = { workspace = true }

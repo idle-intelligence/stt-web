@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "crates/mimi-wasm",
     "crates/stt-wasm",
 ]
 resolver = "2"
