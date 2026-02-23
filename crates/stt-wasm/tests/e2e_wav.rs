@@ -7,11 +7,18 @@
 use burn::backend::wgpu::WgpuDevice;
 
 use stt_wasm::gguf::Q4ModelLoader;
+use stt_wasm::mimi_encoder::MimiEncoder;
 use stt_wasm::stream::SttStream;
 use stt_wasm::SttConfig;
 
 fn device() -> WgpuDevice {
     WgpuDevice::default()
+}
+
+/// Load Mimi encoder from a safetensors file path.
+fn load_mimi(path: &str) -> MimiEncoder {
+    let data = std::fs::read(path).expect("Failed to read Mimi weights");
+    MimiEncoder::from_bytes(&data).expect("Failed to load Mimi encoder")
 }
 
 /// Minimal SentencePiece .model parser (protobuf).
@@ -119,6 +126,23 @@ fn decode_tokens(vocab: &[String], token_ids: &[u32]) -> String {
     text.replace('\u{2581}', " ").trim().to_string()
 }
 
+fn read_wav(path: &std::path::Path) -> (Vec<f32>, u32, f64) {
+    let reader = hound::WavReader::open(path).expect("Failed to open WAV");
+    let spec = reader.spec();
+    let samples: Vec<f32> = match spec.sample_format {
+        hound::SampleFormat::Float => {
+            reader.into_samples::<f32>().map(|s| s.unwrap()).collect()
+        }
+        hound::SampleFormat::Int => {
+            let bits = spec.bits_per_sample;
+            let max_val = (1 << (bits - 1)) as f32;
+            reader.into_samples::<i32>().map(|s| s.unwrap() as f32 / max_val).collect()
+        }
+    };
+    let duration_s = samples.len() as f64 / spec.sample_rate as f64;
+    (samples, spec.sample_rate, duration_s)
+}
+
 #[test]
 fn test_e2e_wav_to_text() {
     pollster::block_on(async {
@@ -138,28 +162,12 @@ fn test_e2e_wav_to_text() {
 
         // === Step 1: Read WAV ===
         println!("=== Step 1: Reading WAV ===");
-        let reader = hound::WavReader::open(wav_path).expect("Failed to open WAV");
-        let spec = reader.spec();
-        println!("WAV: {}Hz, {}ch, {} samples",
-            spec.sample_rate, spec.channels, reader.len());
-
-        let samples: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Float => {
-                reader.into_samples::<f32>().map(|s| s.unwrap()).collect()
-            }
-            hound::SampleFormat::Int => {
-                let bits = spec.bits_per_sample;
-                let max_val = (1 << (bits - 1)) as f32;
-                reader.into_samples::<i32>().map(|s| s.unwrap() as f32 / max_val).collect()
-            }
-        };
-        let duration_s = samples.len() as f64 / spec.sample_rate as f64;
-        println!("Audio: {:.2}s, {} samples at {}Hz", duration_s, samples.len(), spec.sample_rate);
+        let (samples, sample_rate, duration_s) = read_wav(wav_path);
+        println!("Audio: {:.2}s, {} samples at {}Hz", duration_s, samples.len(), sample_rate);
 
         // === Step 2: Mimi encoder ===
         println!("\n=== Step 2: Mimi encoding (batch mode) ===");
-        let mut mimi = mimi_wasm::MimiCodec::new(mimi_weights_path).await
-            .expect("Failed to create Mimi codec");
+        let mut mimi = load_mimi(mimi_weights_path);
 
         // Encode all audio at once (batch mode — avoids frame-boundary artifacts)
         let mimi_start = std::time::Instant::now();
@@ -263,25 +271,12 @@ fn test_e2e_wav_bria() {
 
         // === Read WAV ===
         println!("=== Reading WAV: test-bria.wav ===");
-        let reader = hound::WavReader::open(wav_path).expect("Failed to open WAV");
-        let spec = reader.spec();
-        let samples: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Float => {
-                reader.into_samples::<f32>().map(|s| s.unwrap()).collect()
-            }
-            hound::SampleFormat::Int => {
-                let bits = spec.bits_per_sample;
-                let max_val = (1 << (bits - 1)) as f32;
-                reader.into_samples::<i32>().map(|s| s.unwrap() as f32 / max_val).collect()
-            }
-        };
-        let duration_s = samples.len() as f64 / spec.sample_rate as f64;
+        let (samples, _sample_rate, duration_s) = read_wav(wav_path);
         println!("Audio: {:.2}s, {} samples", duration_s, samples.len());
 
         // === Mimi encoding (batch mode) ===
         println!("Mimi encoding (batch)...");
-        let mut mimi = mimi_wasm::MimiCodec::new(mimi_weights_path).await
-            .expect("Failed to create Mimi codec");
+        let mut mimi = load_mimi(mimi_weights_path);
 
         let mimi_start = std::time::Instant::now();
         let flat_tokens = mimi.encode_all(&samples);
@@ -365,25 +360,12 @@ fn test_e2e_streaming() {
 
         // === Read WAV ===
         println!("=== Streaming E2E: Reading WAV ===");
-        let reader = hound::WavReader::open(wav_path).expect("Failed to open WAV");
-        let spec = reader.spec();
-        let samples: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Float => {
-                reader.into_samples::<f32>().map(|s| s.unwrap()).collect()
-            }
-            hound::SampleFormat::Int => {
-                let bits = spec.bits_per_sample;
-                let max_val = (1 << (bits - 1)) as f32;
-                reader.into_samples::<i32>().map(|s| s.unwrap() as f32 / max_val).collect()
-            }
-        };
-        let duration_s = samples.len() as f64 / spec.sample_rate as f64;
-        println!("Audio: {:.2}s, {} samples at {}Hz", duration_s, samples.len(), spec.sample_rate);
+        let (samples, sample_rate, duration_s) = read_wav(wav_path);
+        println!("Audio: {:.2}s, {} samples at {}Hz", duration_s, samples.len(), sample_rate);
 
         // === Load Mimi (streaming mode) ===
         println!("\n=== Loading Mimi (streaming) ===");
-        let mut mimi = mimi_wasm::MimiCodec::new(mimi_weights_path).await
-            .expect("Failed to create Mimi codec");
+        let mut mimi = load_mimi(mimi_weights_path);
 
         // === Load STT model ===
         println!("Loading STT model...");
@@ -406,7 +388,7 @@ fn test_e2e_streaming() {
         let mut chunk_count = 0;
         let num_codebooks = config.num_codebooks;
 
-        println!("\n=== Streaming audio in {}‐sample chunks ===", chunk_size);
+        println!("\n=== Streaming audio in {}\u{2010}sample chunks ===", chunk_size);
         let start = std::time::Instant::now();
 
         for chunk_start in (0..samples.len()).step_by(chunk_size) {
@@ -483,25 +465,12 @@ fn test_e2e_streaming_bria() {
 
         // === Read WAV ===
         println!("=== Streaming E2E (bria): Reading WAV ===");
-        let reader = hound::WavReader::open(wav_path).expect("Failed to open WAV");
-        let spec = reader.spec();
-        let samples: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Float => {
-                reader.into_samples::<f32>().map(|s| s.unwrap()).collect()
-            }
-            hound::SampleFormat::Int => {
-                let bits = spec.bits_per_sample;
-                let max_val = (1 << (bits - 1)) as f32;
-                reader.into_samples::<i32>().map(|s| s.unwrap() as f32 / max_val).collect()
-            }
-        };
-        let duration_s = samples.len() as f64 / spec.sample_rate as f64;
-        println!("Audio: {:.2}s, {} samples at {}Hz", duration_s, samples.len(), spec.sample_rate);
+        let (samples, sample_rate, duration_s) = read_wav(wav_path);
+        println!("Audio: {:.2}s, {} samples at {}Hz", duration_s, samples.len(), sample_rate);
 
         // === Load Mimi (streaming mode) ===
         println!("\n=== Loading Mimi (streaming) ===");
-        let mut mimi = mimi_wasm::MimiCodec::new(mimi_weights_path).await
-            .expect("Failed to create Mimi codec");
+        let mut mimi = load_mimi(mimi_weights_path);
 
         // === Load STT model ===
         println!("Loading STT model...");
@@ -523,7 +492,7 @@ fn test_e2e_streaming_bria() {
         let mut total_frames = 0;
         let num_codebooks = config.num_codebooks;
 
-        println!("\n=== Streaming audio in {}‐sample chunks ===", chunk_size);
+        println!("\n=== Streaming audio in {}\u{2010}sample chunks ===", chunk_size);
         let start = std::time::Instant::now();
 
         for chunk_start in (0..samples.len()).step_by(chunk_size) {
@@ -632,23 +601,10 @@ fn test_profiling_all() {
             }
 
             // Read WAV
-            let reader = hound::WavReader::open(&wav_path).expect("Failed to open WAV");
-            let spec = reader.spec();
-            let samples: Vec<f32> = match spec.sample_format {
-                hound::SampleFormat::Float => {
-                    reader.into_samples::<f32>().map(|s| s.unwrap()).collect()
-                }
-                hound::SampleFormat::Int => {
-                    let bits = spec.bits_per_sample;
-                    let max_val = (1 << (bits - 1)) as f32;
-                    reader.into_samples::<i32>().map(|s| s.unwrap() as f32 / max_val).collect()
-                }
-            };
-            let duration_s = samples.len() as f64 / spec.sample_rate as f64;
+            let (samples, _sample_rate, duration_s) = read_wav(&wav_path);
 
             // Fresh Mimi + STT stream
-            let mut mimi = mimi_wasm::MimiCodec::new(mimi_weights_path).await
-                .expect("Failed to create Mimi codec");
+            let mut mimi = load_mimi(mimi_weights_path);
             let mut stream = SttStream::new(config.clone(), model.create_cache());
 
             let chunk_size = 2400;
