@@ -85,6 +85,10 @@ impl SessionMetrics {
     }
 }
 
+use crate::mimi_encoder::MimiEncoder;
+
+// ---- WASM entry points ----
+
 /// Initialize panic hook for better error messages in browser console.
 #[cfg_attr(target_family = "wasm", wasm_bindgen(start))]
 pub fn start() {
@@ -162,7 +166,7 @@ pub async fn init_wgpu_device() {
 pub struct SttEngine {
     model: Option<SttModel>,
     stream: Option<SttStream>,
-    mimi: Option<mimi_wasm::MimiCodec>,
+    mimi: Option<MimiEncoder>,
     tokenizer: Option<SpmDecoder>,
     config: SttConfig,
     device: WgpuDevice,
@@ -244,13 +248,16 @@ impl SttEngine {
     }
 
     /// Initialize the Mimi audio codec from pre-fetched weight bytes.
+    ///
+    /// Loads the full Mimi model via mimi-rs (candle), with automatic key
+    /// remapping from the standard Mimi safetensors naming convention.
     #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = loadMimi))]
     pub fn load_mimi(&mut self, data: &[u8]) -> Result<(), JsError> {
         wasm_log(&format!("[stt] Loading Mimi codec ({} bytes)...", data.len()));
-        let mimi = mimi_wasm::MimiCodec::from_bytes(data)
-            .map_err(|e| JsError::new(&format!("Failed to load Mimi: {e:?}")))?;
+        let mimi = MimiEncoder::from_bytes(data)
+            .map_err(|e| JsError::new(&format!("Failed to load Mimi: {e}")))?;
         self.mimi = Some(mimi);
-        wasm_log("[stt] Mimi codec loaded");
+        wasm_log("[stt] Mimi codec loaded (mimi-rs, Q8_0 transformer)");
         Ok(())
     }
 

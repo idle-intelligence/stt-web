@@ -15,6 +15,8 @@ pub mod gguf;
 #[cfg(feature = "wgpu")]
 pub mod stream;
 
+pub mod mimi_encoder;
+pub mod mimi_remap;
 pub mod tokenizer;
 
 #[cfg(feature = "wasm")]
