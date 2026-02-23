@@ -312,14 +312,14 @@ async function handleStop() {
     } else {
         logState('Flush returned empty text');
     }
+    const m = engine.getMetrics();
+    const avgMimiMs = m.total_frames > 0 ? m.mimi_encode_ms / m.total_frames : 0;
+    const avgSttMs = m.total_frames > 0 ? m.stt_forward_ms / m.total_frames : 0;
+    const avgFrameMs = m.total_frames > 0 ? m.total_ms / m.total_frames : 0;
     const rtf = {
         total: totalTime / audioDuration,
         audioDuration,
     };
-
-    const m = engine.getMetrics();
-    const avgMimiMs = m.total_frames > 0 ? m.mimi_encode_ms / m.total_frames : 0;
-    const avgSttMs = m.total_frames > 0 ? m.stt_forward_ms / m.total_frames : 0;
     logState(`Done: ${audioDuration.toFixed(1)}s audio, ${audioChunkCount} chunks, ${m.total_frames} frames, ${tokenCount} tokens, RTF=${rtf.total.toFixed(3)}, avg Mimi=${avgMimiMs.toFixed(1)}ms avg STT=${avgSttMs.toFixed(1)}ms`);
 
     // Send final metrics
@@ -327,7 +327,7 @@ async function handleStop() {
         type: 'metrics',
         ttfb: m.ttfb_ms >= 0 ? m.ttfb_ms : null,
         framesPerSec: m.total_frames > 0 ? m.total_frames / totalTime : 0,
-        avgFrameMs: m.total_frames > 0 ? m.total_ms / m.total_frames : 0,
+        avgFrameMs,
         mimiMs: avgMimiMs,
         sttMs: avgSttMs,
         rtf: rtf.total,
