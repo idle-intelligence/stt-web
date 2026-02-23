@@ -35,7 +35,9 @@ burn = { workspace = true }
 cubecl = { workspace = true }
 
 # Mimi audio codec (candle-based, shared with tts-web)
-mimi-rs = { git = "https://github.com/idle-intelligence/mimi-rs.git", branch = "feat/rvq-quantizer-streaming-encode" }
+# Using local path for development; switch to git after mimi-rs PR merges:
+# mimi-rs = { git = "https://github.com/idle-intelligence/mimi-rs.git" }
+mimi-rs = { path = "../../../mimi-rs" }
 candle-core = "0.9"
 candle-nn = "0.9"
 safetensors = "0.4"
