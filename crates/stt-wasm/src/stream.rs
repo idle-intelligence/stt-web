@@ -1,7 +1,7 @@
 //! Delayed-streams decoding loop.
 //!
 //! Audio and text run as parallel time-aligned streams.
-//! Text is delayed by `delay` frames (7 frames = 560ms for stt-1b-en_fr).
+//! Text is delayed by `delay` frames (6 frames = 480ms for stt-1b-en_fr).
 //! Each step: model receives current audio frame + previous text token,
 //! predicts next text token.
 //!
@@ -26,6 +26,10 @@ pub struct SttStream {
     /// When present, `resolve_pending()` must be called before the next frame
     /// to complete the readback and update `last_text_token`.
     pending_argmax: Option<PendingFrame>,
+    /// Last two predictions during the delay period, for limit-cycle detection.
+    /// Q4 quantization can cause degenerate oscillations (e.g. 260↔263) that
+    /// the F32 reference model doesn't exhibit.
+    delay_prev: [u32; 2],
 }
 
 /// A submitted but not-yet-resolved frame result.
@@ -45,6 +49,7 @@ impl SttStream {
             config,
             cache,
             pending_argmax: None,
+            delay_prev: [u32::MAX; 2],
         }
     }
 
@@ -83,7 +88,7 @@ impl SttStream {
         );
 
         self.frame_count += 1;
-        let emits = self.frame_count > self.config.text_delay;
+        let emits = self.frame_count >= self.config.text_delay;
 
         let logits = model.forward(audio_tokens, self.last_text_token, &mut self.cache);
         let argmax = logits.argmax(2);
@@ -104,12 +109,31 @@ impl SttStream {
             self.last_text_token = token;
             Some(token)
         } else {
-            // During the delay period, force padding as the text input for
-            // the next frame. The model was trained with teacher forcing where
-            // text input is always padding during the delay. Feeding back the
-            // model's own predictions here gives it out-of-distribution input,
-            // causing it to enter degenerate limit cycles (e.g. 260↔263).
-            self.last_text_token = self.config.text_padding_id;
+            // Delay period: feed back the model's own prediction, matching the
+            // reference PyTorch/Candle implementations. The model expects to see
+            // its previous prediction as text input (autoregressive), even during
+            // the delay when tokens aren't emitted to the user.
+            //
+            // Q4 quantization can cause degenerate limit cycles (e.g. 260↔263)
+            // that the F32 reference model doesn't exhibit. Detect oscillation
+            // and break it by forcing padding for one frame.
+            let prev = self.delay_prev;
+            self.delay_prev = [prev[1], token];
+
+            if token != self.config.text_padding_id
+                && token != 0
+                && token == prev[0]
+                && token != prev[1]
+            {
+                // A↔B oscillation detected (e.g. 260→263→260): break the cycle.
+                Self::log(&format!(
+                    "[stt] delay limit-cycle detected: {}↔{}, forcing padding",
+                    prev[1], token,
+                ));
+                self.last_text_token = self.config.text_padding_id;
+            } else {
+                self.last_text_token = token;
+            }
             None
         }
     }
@@ -160,7 +184,7 @@ impl SttStream {
         eprintln!("{}", msg);
     }
 
-    /// Flush remaining text after VAD detects end of speech.
+    /// Flush remaining text after end of speech.
     pub async fn flush(&mut self, model: &SttModel) -> Vec<u32> {
         // Drain any pending frame from the pipeline first.
         let mut tokens = Vec::new();
@@ -184,6 +208,7 @@ impl SttStream {
         self.frame_count = 0;
         self.last_text_token = self.config.text_start_token;
         self.pending_argmax = None;
+        self.delay_prev = [u32::MAX; 2];
         self.cache.reset();
     }
 
@@ -194,6 +219,7 @@ impl SttStream {
         self.frame_count = 0;
         self.last_text_token = self.config.text_start_token;
         self.pending_argmax = None;
+        self.delay_prev = [u32::MAX; 2];
         self.cache.reset_keep_buffers();
     }
 }

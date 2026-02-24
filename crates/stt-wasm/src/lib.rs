@@ -1,7 +1,7 @@
 //! STT 1B — browser-native speech-to-text.
 //!
 //! Decoder-only transformer consuming Mimi audio codec tokens (32 codebooks at 12.5Hz)
-//! and producing text tokens on a delayed parallel stream (7 frames / 560ms offset).
+//! and producing text tokens on a delayed parallel stream (6 frames / 480ms offset).
 //!
 //! Uses Burn's wgpu backend for GPU inference — works natively (Vulkan/Metal) and
 //! in the browser (WASM + WebGPU).
@@ -70,7 +70,7 @@ impl Default for SttConfig {
             text_in_vocab_size: 8001,
             num_codebooks: 32,
             audio_vocab_size: 2049,
-            text_delay: 7,
+            text_delay: 6,
             rope_theta: 100000.0,
             max_seq_len: 4096,
             sliding_window: 750,

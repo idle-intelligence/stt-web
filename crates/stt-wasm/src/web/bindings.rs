@@ -295,6 +295,16 @@ impl SttEngine {
             .mimi
             .as_mut()
             .ok_or_else(|| JsError::new("Mimi not loaded. Call loadMimi first."))?;
+
+        // --- Mimi encode (CPU) ---
+        // This runs while any pending GPU work from the previous call executes
+        // on the GPU hardware in parallel.
+        let t_mimi_start = now_ms();
+        let mimi_tokens = mimi.feed_audio(samples);
+        let t_mimi_end = now_ms();
+
+        let num_codebooks = self.config.num_codebooks;
+
         let model = self
             .model
             .as_ref()
@@ -304,16 +314,7 @@ impl SttEngine {
             .as_mut()
             .ok_or_else(|| JsError::new("Stream not initialized."))?;
 
-        // --- Mimi encode (CPU) ---
-        // This runs while any pending GPU work from the previous call executes
-        // on the GPU hardware in parallel.
-        let t_mimi_start = now_ms();
-        let tokens = mimi.feed_audio(samples);
-        let t_mimi_end = now_ms();
-
         // --- Resolve pending GPU readback from previous call ---
-        // By now the GPU has had ~20ms of Mimi CPU time to finish, so this
-        // await should resolve near-instantly.
         let mut text_tokens = Vec::new();
         if let Some(token) = stream.resolve_pending_as_token().await {
             if !self.metrics.has_token
@@ -326,9 +327,8 @@ impl SttEngine {
             text_tokens.push(token);
         }
 
-        // --- STT forward (pipelined) ---
-        let num_codebooks = self.config.num_codebooks;
-        let mimi_frames = tokens.len() / num_codebooks;
+        let tokens = mimi_tokens;
+        let total_mimi_frames = tokens.len() / num_codebooks;
 
         let t_stt_start = now_ms();
 
@@ -349,7 +349,6 @@ impl SttEngine {
             if is_last {
                 // Leave the last frame pending — it will be resolved on the
                 // next feed_audio call, overlapping with Mimi encode.
-                // Don't await here.
             } else {
                 // For non-last frames, resolve immediately (we need the token
                 // for the next frame's input).
@@ -372,7 +371,7 @@ impl SttEngine {
         let mimi_ms = t_mimi_end - t_mimi_start;
         let stt_ms = t_stt_end - t_stt_start;
         let total_call_ms = t_end - t_start;
-        self.metrics.total_frames += mimi_frames;
+        self.metrics.total_frames += total_mimi_frames;
         self.metrics.total_tokens += text_tokens.len();
         self.metrics.total_mimi_ms += mimi_ms;
         self.metrics.total_stt_ms += stt_ms;
@@ -382,7 +381,6 @@ impl SttEngine {
         let text = if let Some(ref tok) = self.tokenizer {
             tok.decode(&text_tokens)
         } else {
-            // Fallback: return token IDs as comma-separated string
             text_tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",")
         };
 
@@ -451,7 +449,7 @@ impl SttEngine {
     ///
     /// Feeds 10 dummy frames through the STT transformer with varied audio
     /// tokens, exercising all shader variants and the delay→emit transition
-    /// (text_delay = 7). Uses `reset_keep_buffers()` afterwards to keep GPU
+    /// (text_delay = 6). Uses `reset_keep_buffers()` afterwards to keep GPU
     /// KV cache buffers allocated, avoiding re-allocation on first real frame.
     ///
     /// Call after `loadModel()` + `loadMimi()`. Reduces TTFB by ~150-400ms.
@@ -468,10 +466,10 @@ impl SttEngine {
 
         let t0 = now_ms();
 
-        // Run 10 forward passes (past text_delay=7) to exercise:
+        // Run 10 forward passes (past text_delay=6) to exercise:
         // - All Q4 matmul / RmsNorm / softmax / RoPE shader variants
         // - KV cache lazy allocation and ring buffer writes
-        // - The delay→emit code path transition (frame 8+)
+        // - The delay→emit code path transition (frame 6+)
         // Use varied token values to avoid any zero-optimized GPU paths.
         let num_cb = self.config.num_codebooks;
         for i in 0..10u32 {
