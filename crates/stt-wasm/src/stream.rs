@@ -99,8 +99,19 @@ impl SttStream {
     pub async fn resolve_pending_as_token(&mut self) -> Option<u32> {
         let pending = self.pending_argmax.take()?;
         let token = self.readback_argmax(pending.argmax).await;
-        self.last_text_token = token;
-        if pending.emits { Some(token) } else { None }
+
+        if pending.emits {
+            self.last_text_token = token;
+            Some(token)
+        } else {
+            // During the delay period, force padding as the text input for
+            // the next frame. The model was trained with teacher forcing where
+            // text input is always padding during the delay. Feeding back the
+            // model's own predictions here gives it out-of-distribution input,
+            // causing it to enter degenerate limit cycles (e.g. 260↔263).
+            self.last_text_token = self.config.text_padding_id;
+            None
+        }
     }
 
     /// Await any pending GPU readback and update `last_text_token`.
