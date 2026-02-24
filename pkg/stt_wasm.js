@@ -138,7 +138,7 @@ export class SttEngine {
      *
      * Feeds 10 dummy frames through the STT transformer with varied audio
      * tokens, exercising all shader variants and the delay→emit transition
-     * (text_delay = 7). Uses `reset_keep_buffers()` afterwards to keep GPU
+     * (text_delay = 6). Uses `reset_keep_buffers()` afterwards to keep GPU
      * KV cache buffers allocated, avoiding re-allocation on first real frame.
      *
      * Call after `loadModel()` + `loadMimi()`. Reduces TTFB by ~150-400ms.
