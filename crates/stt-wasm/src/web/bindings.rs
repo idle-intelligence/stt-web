@@ -6,13 +6,15 @@
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 use burn::backend::wgpu::WgpuDevice;
 
 use crate::gguf::Q4ModelLoader;
 use crate::model::SttModel;
-use crate::stream::SttStream;
+use crate::stream::{readback_argmax_free, SttStream};
 use crate::tokenizer::SpmDecoder;
 use crate::SttConfig;
 
@@ -53,7 +55,6 @@ struct SessionMetrics {
     total_tokens: usize,
     // Cumulative timing
     total_mimi_ms: f64,
-    total_resolve_ms: f64,
     total_stt_ms: f64,
     total_ms: f64,
 }
@@ -68,7 +69,6 @@ impl SessionMetrics {
             total_frames: 0,
             total_tokens: 0,
             total_mimi_ms: 0.0,
-            total_resolve_ms: 0.0,
             total_stt_ms: 0.0,
             total_ms: 0.0,
         }
@@ -174,6 +174,13 @@ pub struct SttEngine {
     device: WgpuDevice,
     shard_bufs: Vec<Vec<u8>>,
     metrics: SessionMetrics,
+    /// Tokens resolved asynchronously by `spawn_local` readback tasks.
+    /// Each entry is `(token_id, emits)`. Drained at the start of each
+    /// `feedAudio` call and on `flush`.
+    token_sink: Rc<RefCell<Vec<(u32, bool)>>>,
+    /// Promises that resolve when each batch of `spawn_local` readbacks
+    /// completes. `flush()` awaits all of these before proceeding.
+    readback_promises: Vec<js_sys::Promise>,
 }
 
 #[cfg_attr(target_family = "wasm", wasm_bindgen)]
@@ -197,6 +204,8 @@ impl SttEngine {
             device,
             shard_bufs: Vec::new(),
             metrics: SessionMetrics::new(),
+            token_sink: Rc::new(RefCell::new(Vec::new())),
+            readback_promises: Vec::new(),
         }
     }
 
@@ -279,12 +288,17 @@ impl SttEngine {
     /// Audio goes through: Mimi codec → STT transformer → text tokens → detokenize.
     /// Per-call timing is stored in metrics (retrieve via `getMetrics()`).
     ///
-    /// **Pipelining:** The last frame's GPU work (forward + argmax) is left
-    /// pending at the end of each call. On the *next* call, Mimi encode (CPU)
-    /// runs first while the GPU finishes, then we resolve the pending readback.
-    /// This overlaps ~20ms of CPU work with the GPU readback latency.
+    /// **Non-blocking GPU readback:** This method is synchronous — it never
+    /// awaits GPU buffer mapping. Instead, it:
+    /// 1. Drains tokens resolved asynchronously by previous calls' `spawn_local` tasks
+    /// 2. Runs Mimi encode (CPU) + STT forward pass (GPU dispatch)
+    /// 3. Fires `spawn_local` to read back the new argmax tensors in the background
+    /// 4. Returns text from step 1
+    ///
+    /// Text arrives one audio chunk late (~80ms). The pipeline never stalls
+    /// on the ~250ms `mapAsync` latency that Chrome/Dawn imposes.
     #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = feedAudio))]
-    pub async fn feed_audio(&mut self, samples: &[f32]) -> Result<String, JsError> {
+    pub fn feed_audio(&mut self, samples: &[f32]) -> Result<String, JsError> {
         let t_start = now_ms();
 
         // Track first audio arrival for TTFB
@@ -293,16 +307,32 @@ impl SttEngine {
             self.metrics.first_audio_ms = t_start;
         }
 
+        // --- Step 1: Drain tokens resolved by previous spawn_local tasks ---
+        let resolved = std::mem::take(&mut *self.token_sink.borrow_mut());
+        let text_tokens: Vec<u32> = resolved
+            .iter()
+            .filter_map(|&(token, emits)| if emits { Some(token) } else { None })
+            .collect();
+
+        // Track TTFB from drained tokens
+        for &token in &text_tokens {
+            if !self.metrics.has_token
+                && token != self.config.text_padding_id
+                && token != 0
+            {
+                self.metrics.has_token = true;
+                self.metrics.first_token_ms = now_ms();
+            }
+        }
+
+        // --- Step 2: Mimi encode (CPU) ---
         let mimi = self
             .mimi
             .as_mut()
             .ok_or_else(|| JsError::new("Mimi not loaded. Call loadMimi first."))?;
 
-        // --- Mimi encode (CPU) ---
-        // This runs while any pending GPU work from the previous call executes
-        // on the GPU hardware in parallel.
         let t_mimi_start = now_ms();
-        let mimi_tokens = mimi.feed_audio(samples);
+        let tokens = mimi.feed_audio(samples);
         let t_mimi_end = now_ms();
 
         let num_codebooks = self.config.num_codebooks;
@@ -316,19 +346,16 @@ impl SttEngine {
             .as_mut()
             .ok_or_else(|| JsError::new("Stream not initialized."))?;
 
-        let tokens = mimi_tokens;
         let total_mimi_frames = tokens.len() / num_codebooks;
 
+        // --- Step 3: STT forward pass (GPU dispatch, no readback) ---
         let t_stt_start = now_ms();
 
-        // Build list of frame slices
         let frame_starts: Vec<usize> = (0..tokens.len())
             .step_by(num_codebooks)
             .filter(|&s| s + num_codebooks <= tokens.len())
             .collect();
 
-        // Submit all frames using GPU-resident text token (no readback between frames).
-        // The argmax stays on GPU and feeds directly into the next frame's embedding.
         for &frame_start in &frame_starts {
             let frame = &tokens[frame_start..frame_start + num_codebooks];
             stream.submit_frame_gpu(frame, model);
@@ -336,32 +363,38 @@ impl SttEngine {
 
         let t_stt_end = now_ms();
 
-        // Batch-read all accumulated tokens for text output (one readback).
-        let t_resolve_start = now_ms();
-        let text_tokens = stream.resolve_batch().await;
-        let t_resolve_end = now_ms();
+        // --- Step 4: Fire-and-forget readback via spawn_local ---
+        let pending = stream.take_batch_pending();
+        if !pending.is_empty() {
+            let sink = self.token_sink.clone();
+            let padding_id = self.config.text_padding_id;
 
-        for &token in &text_tokens {
-            if !self.metrics.has_token
-                && token != self.config.text_padding_id
-                && token != 0
-            {
-                self.metrics.has_token = true;
-                self.metrics.first_token_ms = now_ms();
-            }
+            // Create a Promise so flush() can await completion
+            let mut resolve_fn: Option<js_sys::Function> = None;
+            let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+                resolve_fn = Some(resolve);
+            });
+            let resolve = resolve_fn.unwrap();
+            self.readback_promises.push(promise);
+
+            wasm_bindgen_futures::spawn_local(async move {
+                for frame in pending {
+                    let token = readback_argmax_free(frame.argmax, padding_id).await;
+                    sink.borrow_mut().push((token, frame.emits));
+                }
+                resolve.call0(&JsValue::NULL).ok();
+            });
         }
 
         let t_end = now_ms();
 
         // Update metrics
         let mimi_ms = t_mimi_end - t_mimi_start;
-        let resolve_ms = t_resolve_end - t_resolve_start;
         let stt_ms = t_stt_end - t_stt_start;
         let total_call_ms = t_end - t_start;
         self.metrics.total_frames += total_mimi_frames;
         self.metrics.total_tokens += text_tokens.len();
         self.metrics.total_mimi_ms += mimi_ms;
-        self.metrics.total_resolve_ms += resolve_ms;
         self.metrics.total_stt_ms += stt_ms;
         self.metrics.total_ms += total_call_ms;
 
@@ -369,7 +402,11 @@ impl SttEngine {
         let text = if let Some(ref tok) = self.tokenizer {
             tok.decode(&text_tokens)
         } else {
-            text_tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",")
+            text_tokens
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         };
 
         Ok(text)
@@ -386,7 +423,6 @@ impl SttEngine {
             js_sys::Reflect::set(&obj, &JsValue::from_str(k), &JsValue::from_f64(v)).ok();
         };
         set("mimi_encode_ms", self.metrics.total_mimi_ms);
-        set("gpu_resolve_ms", self.metrics.total_resolve_ms);
         set("stt_forward_ms", self.metrics.total_stt_ms);
         set("total_ms", self.metrics.total_ms);
         set("total_frames", self.metrics.total_frames as f64);
@@ -396,8 +432,31 @@ impl SttEngine {
     }
 
     /// Flush remaining text after end of speech.
+    ///
+    /// Waits for all in-flight `spawn_local` readbacks to complete (blocking
+    /// is acceptable here — flush is end-of-speech, the ~250ms latency is fine),
+    /// then drains the token sink and runs the delay-pipeline drain.
     #[cfg_attr(target_family = "wasm", wasm_bindgen)]
     pub async fn flush(&mut self) -> Result<String, JsError> {
+        // Wait for all in-flight readback promises
+        let promises = std::mem::take(&mut self.readback_promises);
+        if !promises.is_empty() {
+            let arr = js_sys::Array::new();
+            for p in &promises {
+                arr.push(p);
+            }
+            wasm_bindgen_futures::JsFuture::from(js_sys::Promise::all(&arr))
+                .await
+                .ok();
+        }
+
+        // Drain all resolved tokens from spawn_local tasks
+        let resolved = std::mem::take(&mut *self.token_sink.borrow_mut());
+        let mut tokens: Vec<u32> = resolved
+            .iter()
+            .filter_map(|&(token, emits)| if emits { Some(token) } else { None })
+            .collect();
+
         let model = self
             .model
             .as_ref()
@@ -407,12 +466,22 @@ impl SttEngine {
             .as_mut()
             .ok_or_else(|| JsError::new("Stream not initialized."))?;
 
-        let tokens = stream.flush(model).await;
+        // Sync CPU-side last_text_token from GPU-resident argmax.
+        // flush() → feed_frame() uses the CPU token, not the GPU tensor.
+        stream.sync_last_text_token().await;
+
+        // Drain the delay pipeline (feeds zero-audio frames)
+        let flush_tokens = stream.flush(model).await;
+        tokens.extend(flush_tokens);
 
         let text = if let Some(ref tok) = self.tokenizer {
             tok.decode(&tokens)
         } else {
-            tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",")
+            tokens
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         };
 
         Ok(text)
@@ -432,6 +501,8 @@ impl SttEngine {
             mimi.reset();
         }
         self.metrics.reset();
+        self.token_sink.borrow_mut().clear();
+        self.readback_promises.clear();
     }
 
     /// Run warmup passes to pre-compile WebGPU shader pipelines.

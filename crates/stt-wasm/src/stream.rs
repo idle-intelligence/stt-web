@@ -41,11 +41,11 @@ pub struct SttStream {
 }
 
 /// A submitted but not-yet-resolved frame result.
-struct PendingFrame {
+pub struct PendingFrame {
     /// Argmax tensor on GPU, awaiting readback.
-    argmax: Tensor<Wgpu, 3, Int>,
+    pub argmax: Tensor<Wgpu, 3, Int>,
     /// Whether this frame is past the delay (i.e. should emit a token).
-    emits: bool,
+    pub emits: bool,
 }
 
 impl SttStream {
@@ -157,6 +157,41 @@ impl SttStream {
         }
 
         tokens
+    }
+
+    /// Take all pending frames for external (non-blocking) readback.
+    ///
+    /// Used by the WASM bindings to decouple GPU readback from the audio
+    /// processing loop. The caller receives owned `PendingFrame`s and can
+    /// resolve them via `spawn_local` without blocking `feedAudio`.
+    pub fn take_batch_pending(&mut self) -> Vec<PendingFrame> {
+        std::mem::take(&mut self.batch_pending)
+    }
+
+    /// Read back the GPU-resident argmax to synchronize `last_text_token`.
+    ///
+    /// When using the GPU-resident pipeline (`submit_frame_gpu`), the
+    /// autoregressive feedback stays on GPU via `last_text_argmax`.
+    /// But `flush()` → `feed_frame()` needs the CPU-side `last_text_token`.
+    /// Call this before flush to ensure correctness.
+    pub async fn sync_last_text_token(&mut self) {
+        if let Some(ref argmax) = self.last_text_argmax {
+            match argmax.clone().into_data_async().await {
+                Ok(data) => {
+                    if let Ok(vec) = data.to_vec::<i32>() {
+                        if !vec.is_empty() {
+                            self.last_text_token = vec[0] as u32;
+                        }
+                    }
+                }
+                Err(e) => {
+                    Self::log(&format!(
+                        "[stt] sync_last_text_token readback failed: {:?}",
+                        e
+                    ));
+                }
+            }
+        }
     }
 
     /// Await the GPU readback of a pending frame, update `last_text_token`,
@@ -292,4 +327,36 @@ impl SttStream {
         self.delay_prev = [u32::MAX; 2];
         self.cache.reset_keep_buffers();
     }
+}
+
+/// Perform async GPU readback on an argmax tensor (free function).
+///
+/// Same logic as `SttStream::readback_argmax` but doesn't require `&self`,
+/// so it can be called from a `spawn_local` closure that only holds owned
+/// tensors and shared state (no borrow on `SttStream`).
+pub async fn readback_argmax_free(pred: Tensor<Wgpu, 3, Int>, padding_id: u32) -> u32 {
+    match Tensor::<Wgpu, 3, Int>::into_data_async(pred).await {
+        Ok(data) => match data.to_vec::<i32>() {
+            Ok(vec) => vec[0] as u32,
+            Err(e) => {
+                log_warn(&format!("[stt] GPU readback to_vec FAILED: {:?}", e));
+                padding_id
+            }
+        },
+        Err(e) => {
+            log_warn(&format!(
+                "[stt] GPU readback into_data_async FAILED: {:?}",
+                e
+            ));
+            padding_id
+        }
+    }
+}
+
+/// Log a warning to console (WASM) or stderr (native).
+fn log_warn(msg: &str) {
+    #[cfg(target_family = "wasm")]
+    web_sys::console::warn_1(&msg.into());
+    #[cfg(not(target_family = "wasm"))]
+    eprintln!("{}", msg);
 }

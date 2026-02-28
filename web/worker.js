@@ -255,8 +255,10 @@ async function handleAudio({ samples }) {
     totalSamples += audioData.length;
     audioChunkCount++;
 
-    // Process chunk immediately (streaming encode → text)
-    const text = await engine.feedAudio(audioData);
+    // Process chunk immediately (streaming encode → text).
+    // feedAudio is synchronous — GPU readback runs in the background via
+    // spawn_local and text from previous chunks is returned immediately.
+    const text = engine.feedAudio(audioData);
 
     if (text) {
         tokenCount++;
@@ -320,7 +322,7 @@ async function handleStop() {
         total: totalTime / audioDuration,
         audioDuration,
     };
-    logState(`Done: ${audioDuration.toFixed(1)}s audio, ${audioChunkCount} chunks, ${m.total_frames} frames, ${tokenCount} tokens, RTF=${rtf.total.toFixed(3)}, avg Mimi=${avgMimiMs.toFixed(1)}ms avg STT=${avgSttMs.toFixed(1)}ms`);
+    logState(`Done: ${audioDuration.toFixed(1)}s audio, ${audioChunkCount} chunks, ${m.total_frames} frames, ${tokenCount} tokens, RTF=${rtf.total.toFixed(3)}, avg Mimi=${avgMimiMs.toFixed(1)}ms STT=${avgSttMs.toFixed(1)}ms frame=${avgFrameMs.toFixed(1)}ms`);
 
     // Send final metrics
     self.postMessage({
