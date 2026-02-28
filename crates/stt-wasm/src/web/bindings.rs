@@ -53,6 +53,7 @@ struct SessionMetrics {
     total_tokens: usize,
     // Cumulative timing
     total_mimi_ms: f64,
+    total_resolve_ms: f64,
     total_stt_ms: f64,
     total_ms: f64,
 }
@@ -67,6 +68,7 @@ impl SessionMetrics {
             total_frames: 0,
             total_tokens: 0,
             total_mimi_ms: 0.0,
+            total_resolve_ms: 0.0,
             total_stt_ms: 0.0,
             total_ms: 0.0,
         }
@@ -314,19 +316,6 @@ impl SttEngine {
             .as_mut()
             .ok_or_else(|| JsError::new("Stream not initialized."))?;
 
-        // --- Resolve pending GPU readback from previous call ---
-        let mut text_tokens = Vec::new();
-        if let Some(token) = stream.resolve_pending_as_token().await {
-            if !self.metrics.has_token
-                && token != self.config.text_padding_id
-                && token != 0
-            {
-                self.metrics.has_token = true;
-                self.metrics.first_token_ms = now_ms();
-            }
-            text_tokens.push(token);
-        }
-
         let tokens = mimi_tokens;
         let total_mimi_frames = tokens.len() / num_codebooks;
 
@@ -337,43 +326,42 @@ impl SttEngine {
             .step_by(num_codebooks)
             .filter(|&s| s + num_codebooks <= tokens.len())
             .collect();
-        let n_frames = frame_starts.len();
 
-        for (i, &frame_start) in frame_starts.iter().enumerate() {
+        // Submit all frames using GPU-resident text token (no readback between frames).
+        // The argmax stays on GPU and feeds directly into the next frame's embedding.
+        for &frame_start in &frame_starts {
             let frame = &tokens[frame_start..frame_start + num_codebooks];
-            let is_last = i == n_frames - 1;
+            stream.submit_frame_gpu(frame, model);
+        }
 
-            // Submit GPU work (forward + argmax, no await)
-            stream.submit_frame(frame, model);
+        let t_stt_end = now_ms();
 
-            if is_last {
-                // Leave the last frame pending — it will be resolved on the
-                // next feed_audio call, overlapping with Mimi encode.
-            } else {
-                // For non-last frames, resolve immediately (we need the token
-                // for the next frame's input).
-                if let Some(token) = stream.resolve_pending_as_token().await {
-                    if !self.metrics.has_token
-                        && token != self.config.text_padding_id
-                        && token != 0
-                    {
-                        self.metrics.has_token = true;
-                        self.metrics.first_token_ms = now_ms();
-                    }
-                    text_tokens.push(token);
-                }
+        // Batch-read all accumulated tokens for text output (one readback).
+        let t_resolve_start = now_ms();
+        let text_tokens = stream.resolve_batch().await;
+        let t_resolve_end = now_ms();
+
+        for &token in &text_tokens {
+            if !self.metrics.has_token
+                && token != self.config.text_padding_id
+                && token != 0
+            {
+                self.metrics.has_token = true;
+                self.metrics.first_token_ms = now_ms();
             }
         }
-        let t_stt_end = now_ms();
+
         let t_end = now_ms();
 
         // Update metrics
         let mimi_ms = t_mimi_end - t_mimi_start;
+        let resolve_ms = t_resolve_end - t_resolve_start;
         let stt_ms = t_stt_end - t_stt_start;
         let total_call_ms = t_end - t_start;
         self.metrics.total_frames += total_mimi_frames;
         self.metrics.total_tokens += text_tokens.len();
         self.metrics.total_mimi_ms += mimi_ms;
+        self.metrics.total_resolve_ms += resolve_ms;
         self.metrics.total_stt_ms += stt_ms;
         self.metrics.total_ms += total_call_ms;
 
@@ -398,6 +386,7 @@ impl SttEngine {
             js_sys::Reflect::set(&obj, &JsValue::from_str(k), &JsValue::from_f64(v)).ok();
         };
         set("mimi_encode_ms", self.metrics.total_mimi_ms);
+        set("gpu_resolve_ms", self.metrics.total_resolve_ms);
         set("stt_forward_ms", self.metrics.total_stt_ms);
         set("total_ms", self.metrics.total_ms);
         set("total_frames", self.metrics.total_frames as f64);

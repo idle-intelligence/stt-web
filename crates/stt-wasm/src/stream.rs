@@ -22,10 +22,18 @@ pub struct SttStream {
     cache: LayerCaches,
     frame_count: usize,
     last_text_token: u32,
+    /// GPU-resident argmax from the previous frame, used for autoregressive
+    /// feedback WITHOUT reading back to CPU. Shape [1] Int on GPU.
+    /// This eliminates the 236ms WebGPU buffer mapping latency per frame.
+    last_text_argmax: Option<Tensor<Wgpu, 1, Int>>,
     /// Pending argmax tensor from a `submit_frame()` call awaiting GPU readback.
     /// When present, `resolve_pending()` must be called before the next frame
     /// to complete the readback and update `last_text_token`.
     pending_argmax: Option<PendingFrame>,
+    /// Accumulated argmax tensors awaiting batch readback for text output.
+    /// Frames are appended during `submit_frame_gpu()` and read back all
+    /// at once via `resolve_batch()`.
+    batch_pending: Vec<PendingFrame>,
     /// Last two predictions during the delay period, for limit-cycle detection.
     /// Q4 quantization can cause degenerate oscillations (e.g. 260↔263) that
     /// the F32 reference model doesn't exhibit.
@@ -45,10 +53,12 @@ impl SttStream {
     pub fn new(config: SttConfig, cache: LayerCaches) -> Self {
         Self {
             last_text_token: config.text_start_token,
+            last_text_argmax: None,
             frame_count: 0,
             config,
             cache,
             pending_argmax: None,
+            batch_pending: Vec::new(),
             delay_prev: [u32::MAX; 2],
         }
     }
@@ -94,6 +104,59 @@ impl SttStream {
         let argmax = logits.argmax(2);
 
         self.pending_argmax = Some(PendingFrame { argmax, emits });
+    }
+
+    /// Queue GPU work using GPU-resident text token (no readback needed).
+    ///
+    /// Like `submit_frame()` but uses `forward_with_gpu_token()` — the
+    /// autoregressive text token stays on GPU as an argmax tensor, avoiding
+    /// the 236ms WebGPU buffer mapping latency between frames.
+    ///
+    /// The argmax result is appended to `batch_pending` for later readback
+    /// via `resolve_batch()` (text output only).
+    pub fn submit_frame_gpu(
+        &mut self,
+        audio_tokens: &[u32],
+        model: &SttModel,
+    ) {
+        self.frame_count += 1;
+        let emits = self.frame_count >= self.config.text_delay;
+
+        let logits = model.forward_with_gpu_token(
+            audio_tokens,
+            self.last_text_argmax.take(),
+            self.last_text_token,
+            &mut self.cache,
+        );
+        let argmax = logits.argmax(2);
+
+        // Keep argmax on GPU for the next frame's autoregressive input.
+        self.last_text_argmax = Some(argmax.clone().reshape([1]));
+
+        // Queue for batch readback (text output).
+        self.batch_pending.push(PendingFrame { argmax, emits });
+    }
+
+    /// Batch-read all accumulated argmax tensors and return emitted tokens.
+    ///
+    /// Called once at the end of `feed_audio()` instead of per-frame.
+    /// A single readback of the last pending argmax pays the 236ms mapAsync
+    /// cost once, not per frame.
+    pub async fn resolve_batch(&mut self) -> Vec<u32> {
+        let pending = std::mem::take(&mut self.batch_pending);
+        let mut tokens = Vec::new();
+
+        for frame in pending {
+            let token = self.readback_argmax(frame.argmax).await;
+            if frame.emits {
+                self.last_text_token = token;
+                tokens.push(token);
+            } else {
+                self.last_text_token = token;
+            }
+        }
+
+        tokens
     }
 
     /// Await the GPU readback of a pending frame, update `last_text_token`,
@@ -186,12 +249,15 @@ impl SttStream {
 
     /// Flush remaining text after end of speech.
     pub async fn flush(&mut self, model: &SttModel) -> Vec<u32> {
-        // Drain any pending frame from the pipeline first.
-        let mut tokens = Vec::new();
+        // Drain any pending frames from either pipeline path.
+        let mut tokens = self.resolve_batch().await;
         if let Some(token) = self.resolve_pending_as_token().await {
             tokens.push(token);
         }
 
+        // Feed zero-audio frames to drain the delay pipeline.
+        // Use feed_frame (old path) since flush is not perf-critical
+        // and needs per-frame readback for the text tokens.
         let zero_audio = vec![0u32; self.config.num_codebooks];
 
         for _ in 0..self.config.text_delay {
@@ -207,7 +273,9 @@ impl SttStream {
     pub fn reset(&mut self) {
         self.frame_count = 0;
         self.last_text_token = self.config.text_start_token;
+        self.last_text_argmax = None;
         self.pending_argmax = None;
+        self.batch_pending.clear();
         self.delay_prev = [u32::MAX; 2];
         self.cache.reset();
     }
@@ -218,7 +286,9 @@ impl SttStream {
     pub fn reset_keep_buffers(&mut self) {
         self.frame_count = 0;
         self.last_text_token = self.config.text_start_token;
+        self.last_text_argmax = None;
         self.pending_argmax = None;
+        self.batch_pending.clear();
         self.delay_prev = [u32::MAX; 2];
         self.cache.reset_keep_buffers();
     }

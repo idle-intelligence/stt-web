@@ -664,11 +664,24 @@ impl Q4ModelParts {
             .collect();
 
         let [text_vocab, text_dim] = self.text_emb_shape;
+
+        // Dequantize text embedding from Q4 to f32 and upload to GPU.
+        // This enables GPU-resident token lookups via Tensor::select(),
+        // eliminating the 236ms WebGPU buffer readback per frame.
+        // Memory cost: 8001 × 2048 × 4 bytes ≈ 62 MB.
+        let text_emb_gpu = Self::dequant_embedding_to_gpu(
+            &self.text_emb_bytes,
+            text_vocab,
+            text_dim,
+            device,
+        );
+
         let text_emb = EmbeddingStore::new(self.text_emb_bytes, text_vocab, text_dim);
 
         Ok(SttModel::new(
             audio_emb,
             text_emb,
+            text_emb_gpu,
             self.layers,
             self.rope,
             self.out_norm,
@@ -676,6 +689,42 @@ impl Q4ModelParts {
             self.config,
             device.clone(),
         ))
+    }
+
+    /// Dequantize a Q4_0 embedding table to f32 and upload to GPU.
+    ///
+    /// Returns a [vocab_size, dim] f32 tensor on GPU.
+    fn dequant_embedding_to_gpu(
+        q4_bytes: &[u8],
+        vocab_size: usize,
+        dim: usize,
+        device: &WgpuDevice,
+    ) -> Tensor<Wgpu, 2> {
+        let blocks_per_row = dim / 32;
+        let bytes_per_row = blocks_per_row * 18;
+        let mut data = vec![0.0f32; vocab_size * dim];
+
+        for row in 0..vocab_size {
+            let row_offset = row * bytes_per_row;
+            let row_bytes = &q4_bytes[row_offset..row_offset + bytes_per_row];
+            let out_offset = row * dim;
+
+            for block in 0..blocks_per_row {
+                let bo = block * 18;
+                let d = f16_to_f32(u16::from_le_bytes([row_bytes[bo], row_bytes[bo + 1]]));
+                let base = out_offset + block * 32;
+                for j in 0..16 {
+                    let byte = row_bytes[bo + 2 + j];
+                    data[base + j] = ((byte & 0x0F) as f32 - 8.0) * d;
+                    data[base + j + 16] = (((byte >> 4) & 0x0F) as f32 - 8.0) * d;
+                }
+            }
+        }
+
+        Tensor::<Wgpu, 2>::from_data(
+            TensorData::new(data, [vocab_size, dim]),
+            device,
+        )
     }
 }
 

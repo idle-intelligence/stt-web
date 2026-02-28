@@ -94,6 +94,8 @@ impl MimiEncoder {
 
         let n_q = codes_flat.len();
         let mut tokens = Vec::with_capacity(n_frames * n_q);
+        // Transpose [n_q, n_frames] → frame-major [n_frames * n_q]
+        #[allow(clippy::needless_range_loop)]
         for f in 0..n_frames {
             for q in 0..n_q {
                 tokens.push(codes_flat[q][f]);

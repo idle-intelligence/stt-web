@@ -17,6 +17,7 @@ use burn::tensor::Tensor;
 
 use crate::gguf::{EmbeddingStore, Q4Linear};
 use crate::SttConfig;
+use burn::tensor::Int;
 
 // ---------------------------------------------------------------------------
 // RoPE — Rotary Position Embeddings
@@ -582,6 +583,10 @@ impl Q4TransformerBlock {
 pub struct SttModel {
     audio_emb: Vec<EmbeddingStore>,
     text_emb: EmbeddingStore,
+    /// Text embedding table as f32 on GPU for GPU-resident token lookups.
+    /// Eliminates the 236ms WebGPU buffer readback per frame by keeping
+    /// the autoregressive text token on GPU (argmax → select → next frame).
+    text_emb_gpu: Tensor<Wgpu, 2>,
     layers: Vec<Q4TransformerBlock>,
     rope: RoPE,
     out_norm: RmsNormLayer,
@@ -595,6 +600,7 @@ impl SttModel {
     pub fn new(
         audio_emb: Vec<EmbeddingStore>,
         text_emb: EmbeddingStore,
+        text_emb_gpu: Tensor<Wgpu, 2>,
         layers: Vec<Q4TransformerBlock>,
         rope: RoPE,
         out_norm: RmsNormLayer,
@@ -605,6 +611,7 @@ impl SttModel {
         Self {
             audio_emb,
             text_emb,
+            text_emb_gpu,
             layers,
             rope,
             out_norm,
@@ -642,6 +649,64 @@ impl SttModel {
             burn::tensor::TensorData::new(sum, [1, 1, dim]),
             &self.device,
         );
+
+        // Run transformer layers with KV cache
+        let mut x = input;
+        for (i, layer) in self.layers.iter().enumerate() {
+            if let Some(c) = cache.get_mut(i) {
+                x = layer.forward_with_cache(x, &self.rope, c);
+            }
+        }
+
+        // Output norm + text linear → logits
+        let x = self.out_norm.forward(x);
+        self.text_linear.forward(x)
+    }
+
+    /// Single-step forward pass with GPU-resident text token.
+    ///
+    /// Like `forward()`, but accepts the previous text token as a GPU argmax
+    /// tensor instead of a CPU u32. This eliminates the 236ms WebGPU buffer
+    /// readback between frames: the argmax result stays on GPU and feeds
+    /// directly into the text embedding lookup via `Tensor::select()`.
+    ///
+    /// `text_argmax`: previous frame's argmax tensor [1] on GPU, or None
+    ///   for the first frame (falls back to `fallback_text_token`).
+    pub fn forward_with_gpu_token(
+        &self,
+        audio_tokens: &[u32],
+        text_argmax: Option<Tensor<Wgpu, 1, Int>>,
+        fallback_text_token: u32,
+        cache: &mut LayerCaches,
+    ) -> Tensor<Wgpu, 3> {
+        let dim = self.config.hidden_size;
+
+        // Audio embeddings: CPU dequant + sum (unchanged)
+        let mut audio_sum = vec![0.0f32; dim];
+        for (i, &token) in audio_tokens.iter().enumerate() {
+            self.audio_emb[i].embed_id_add_cpu(token, &mut audio_sum);
+        }
+        let audio_input = Tensor::<Wgpu, 3>::from_data(
+            burn::tensor::TensorData::new(audio_sum, [1, 1, dim]),
+            &self.device,
+        );
+
+        // Text embedding: GPU select if we have an argmax tensor, else CPU fallback
+        let text_input = if let Some(argmax) = text_argmax {
+            // GPU path: select from f32 embedding table (no readback needed)
+            let selected = self.text_emb_gpu.clone().select(0, argmax);
+            selected.reshape([1, 1, dim])
+        } else {
+            // CPU fallback: Q4 dequant (used for initial/reset state)
+            let mut buf = vec![0.0f32; dim];
+            self.text_emb.embed_id_add_cpu(fallback_text_token, &mut buf);
+            Tensor::<Wgpu, 3>::from_data(
+                burn::tensor::TensorData::new(buf, [1, 1, dim]),
+                &self.device,
+            )
+        };
+
+        let input = audio_input + text_input;
 
         // Run transformer layers with KV cache
         let mut x = input;
