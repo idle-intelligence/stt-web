@@ -275,7 +275,6 @@ async function handleAudio({ samples }) {
             framesPerSec: m.total_frames > 0 ? m.total_frames / elapsed : 0,
             avgFrameMs: m.total_frames > 0 ? m.total_ms / m.total_frames : 0,
             mimiMs: m.total_frames > 0 ? m.mimi_encode_ms / m.total_frames : 0,
-            resolveMs: m.total_frames > 0 ? m.gpu_resolve_ms / m.total_frames : 0,
             sttMs: m.total_frames > 0 ? m.stt_forward_ms / m.total_frames : 0,
             rtf: elapsed / audioDuration,
             audioDuration,
@@ -315,14 +314,13 @@ async function handleStop() {
     }
     const m = engine.getMetrics();
     const avgMimiMs = m.total_frames > 0 ? m.mimi_encode_ms / m.total_frames : 0;
-    const avgResolveMs = m.total_frames > 0 ? m.gpu_resolve_ms / m.total_frames : 0;
     const avgSttMs = m.total_frames > 0 ? m.stt_forward_ms / m.total_frames : 0;
     const avgFrameMs = m.total_frames > 0 ? m.total_ms / m.total_frames : 0;
     const rtf = {
         total: totalTime / audioDuration,
         audioDuration,
     };
-    logState(`Done: ${audioDuration.toFixed(1)}s audio, ${audioChunkCount} chunks, ${m.total_frames} frames, ${tokenCount} tokens, RTF=${rtf.total.toFixed(3)}, avg Mimi=${avgMimiMs.toFixed(1)}ms resolve=${avgResolveMs.toFixed(1)}ms STT=${avgSttMs.toFixed(1)}ms`);
+    logState(`Done: ${audioDuration.toFixed(1)}s audio, ${audioChunkCount} chunks, ${m.total_frames} frames, ${tokenCount} tokens, RTF=${rtf.total.toFixed(3)}, avg Mimi=${avgMimiMs.toFixed(1)}ms STT=${avgSttMs.toFixed(1)}ms frame=${avgFrameMs.toFixed(1)}ms`);
 
     // Send final metrics
     self.postMessage({
