@@ -255,8 +255,10 @@ async function handleAudio({ samples }) {
     totalSamples += audioData.length;
     audioChunkCount++;
 
-    // Process chunk immediately (streaming encode → text)
-    const text = await engine.feedAudio(audioData);
+    // Process chunk immediately (streaming encode → text).
+    // feedAudio is synchronous — GPU readback runs in the background via
+    // spawn_local and text from previous chunks is returned immediately.
+    const text = engine.feedAudio(audioData);
 
     if (text) {
         tokenCount++;
