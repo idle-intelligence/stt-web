@@ -34,44 +34,25 @@ export class SttEngine {
      * Audio goes through: Mimi codec → STT transformer → text tokens → detokenize.
      * Per-call timing is stored in metrics (retrieve via `getMetrics()`).
      *
-     * **Non-blocking GPU readback:** This method is synchronous — it never
-     * awaits GPU buffer mapping. Instead, it:
-     * 1. Drains tokens resolved asynchronously by previous calls' `spawn_local` tasks
-     * 2. Runs Mimi encode (CPU) + STT forward pass (GPU dispatch)
-     * 3. Fires `spawn_local` to read back the new argmax tensors in the background
-     * 4. Returns text from step 1
-     *
-     * Text arrives one audio chunk late (~80ms). The pipeline never stalls
-     * on the ~250ms `mapAsync` latency that Chrome/Dawn imposes.
+     * **Pipelined readback:** awaits the PREVIOUS call's GPU readback at the
+     * start, then dispatches the current frames and leaves them pending for
+     * the next call. Text arrives one chunk late (~80ms). This provides
+     * natural backpressure — if the GPU can't keep up, feedAudio blocks
+     * until the previous readback completes, preventing GPU work from piling up.
      * @param {Float32Array} samples
-     * @returns {string}
+     * @returns {Promise<string>}
      */
     feedAudio(samples) {
-        let deferred3_0;
-        let deferred3_1;
-        try {
-            const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
-            const len0 = WASM_VECTOR_LEN;
-            const ret = wasm.sttengine_feedAudio(this.__wbg_ptr, ptr0, len0);
-            var ptr2 = ret[0];
-            var len2 = ret[1];
-            if (ret[3]) {
-                ptr2 = 0; len2 = 0;
-                throw takeFromExternrefTable0(ret[2]);
-            }
-            deferred3_0 = ptr2;
-            deferred3_1 = len2;
-            return getStringFromWasm0(ptr2, len2);
-        } finally {
-            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
-        }
+        const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.sttengine_feedAudio(this.__wbg_ptr, ptr0, len0);
+        return ret;
     }
     /**
      * Flush remaining text after end of speech.
      *
-     * Waits for all in-flight `spawn_local` readbacks to complete (blocking
-     * is acceptable here — flush is end-of-speech, the ~250ms latency is fine),
-     * then drains the token sink and runs the delay-pipeline drain.
+     * Resolves the last pending batch, syncs the GPU-resident text token
+     * back to CPU, then drains the delay pipeline with zero-audio frames.
      * @returns {Promise<string>}
      */
     flush() {
@@ -245,10 +226,6 @@ function __wbg_get_imports() {
         },
         __wbg__wbg_cb_unref_d9b87ff7982e3b21: function(arg0) {
             arg0._wbg_cb_unref();
-        },
-        __wbg_all_0c81b29cb7d63802: function(arg0) {
-            const ret = Promise.all(arg0);
-            return ret;
         },
         __wbg_beginComputePass_304dccb30a4db2cc: function(arg0, arg1) {
             const ret = arg0.beginComputePass(arg1);
