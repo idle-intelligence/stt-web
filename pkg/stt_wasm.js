@@ -34,25 +34,39 @@ export class SttEngine {
      * Audio goes through: Mimi codec → STT transformer → text tokens → detokenize.
      * Per-call timing is stored in metrics (retrieve via `getMetrics()`).
      *
-     * **Pipelined readback:** awaits the PREVIOUS call's GPU readback at the
-     * start, then dispatches the current frames and leaves them pending for
-     * the next call. Text arrives one chunk late (~80ms). This provides
-     * natural backpressure — if the GPU can't keep up, feedAudio blocks
-     * until the previous readback completes, preventing GPU work from piling up.
+     * **Non-blocking readback via spawn_local:** dispatches GPU work synchronously,
+     * then spawns an async task to read back the argmax tensors. Text arrives
+     * one chunk late (~80ms). The pipeline never stalls on desktop — Firefox's
+     * 100ms mapAsync poll timer has zero impact since readback is fully decoupled.
      * @param {Float32Array} samples
-     * @returns {Promise<string>}
+     * @returns {string}
      */
     feedAudio(samples) {
-        const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.sttengine_feedAudio(this.__wbg_ptr, ptr0, len0);
-        return ret;
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passArrayF32ToWasm0(samples, wasm.__wbindgen_malloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.sttengine_feedAudio(this.__wbg_ptr, ptr0, len0);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
     }
     /**
      * Flush remaining text after end of speech.
      *
-     * Resolves the last pending batch, syncs the GPU-resident text token
-     * back to CPU, then drains the delay pipeline with zero-audio frames.
+     * Awaits the last spawn_local readback, drains the token sink, syncs the
+     * GPU-resident text token back to CPU, then drains the delay pipeline
+     * with zero-audio frames.
      * @returns {Promise<string>}
      */
     flush() {
