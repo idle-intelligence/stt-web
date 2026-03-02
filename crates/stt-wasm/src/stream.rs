@@ -148,11 +148,25 @@ impl SttStream {
 
         for frame in pending {
             let token = self.readback_argmax(frame.argmax).await;
+            self.last_text_token = token;
             if frame.emits {
-                self.last_text_token = token;
                 tokens.push(token);
             } else {
-                self.last_text_token = token;
+                // Q4 limit-cycle detection (mirrors resolve_pending_as_token)
+                let prev = self.delay_prev;
+                self.delay_prev = [prev[1], token];
+                if token != self.config.text_padding_id
+                    && token != 0
+                    && token == prev[0]
+                    && token != prev[1]
+                {
+                    Self::log(&format!(
+                        "[stt] delay limit-cycle detected: {}↔{}, forcing padding",
+                        prev[1], token,
+                    ));
+                    self.last_text_token = self.config.text_padding_id;
+                    self.last_text_argmax = None;
+                }
             }
         }
 
@@ -166,6 +180,21 @@ impl SttStream {
     /// resolve them via `spawn_local` without blocking `feedAudio`.
     pub fn take_batch_pending(&mut self) -> Vec<PendingFrame> {
         std::mem::take(&mut self.batch_pending)
+    }
+
+    /// Set `last_text_token` from an externally resolved readback.
+    ///
+    /// Used by the WASM bindings after concatenated batch readback in flush,
+    /// so that `feed_frame()` (used by the delay-pipeline drain) gets the
+    /// correct autoregressive input without a separate GPU readback.
+    pub fn set_last_text_token(&mut self, token: u32) {
+        self.last_text_token = token;
+    }
+
+    /// Clear GPU-resident autoregressive state (for limit-cycle breaking from spawn_local).
+    pub fn clear_gpu_autoregressive(&mut self) {
+        self.last_text_token = self.config.text_padding_id;
+        self.last_text_argmax = None;
     }
 
     /// Read back the GPU-resident argmax to synchronize `last_text_token`.
@@ -255,7 +284,7 @@ impl SttStream {
     async fn readback_argmax(&self, pred: Tensor<Wgpu, 3, Int>) -> u32 {
         match Tensor::<Wgpu, 3, Int>::into_data_async(pred).await {
             Ok(data) => match data.to_vec::<i32>() {
-                Ok(vec) => vec[0] as u32,
+                Ok(vec) => vec.first().copied().unwrap_or(self.config.text_padding_id as i32) as u32,
                 Err(e) => {
                     Self::log(&format!(
                         "[stt] GPU readback to_vec FAILED (frame {}): {:?}",
@@ -284,7 +313,11 @@ impl SttStream {
 
     /// Flush remaining text after end of speech.
     pub async fn flush(&mut self, model: &SttModel) -> Vec<u32> {
-        // Drain any pending frames from either pipeline path.
+        // Callers should pre-drain via resolve_batch() before calling flush.
+        debug_assert!(
+            self.batch_pending.is_empty(),
+            "flush() called with unresolved batch_pending; caller should resolve_batch() first"
+        );
         let mut tokens = self.resolve_batch().await;
         if let Some(token) = self.resolve_pending_as_token().await {
             tokens.push(token);
@@ -337,7 +370,7 @@ impl SttStream {
 pub async fn readback_argmax_free(pred: Tensor<Wgpu, 3, Int>, padding_id: u32) -> u32 {
     match Tensor::<Wgpu, 3, Int>::into_data_async(pred).await {
         Ok(data) => match data.to_vec::<i32>() {
-            Ok(vec) => vec[0] as u32,
+            Ok(vec) => vec.first().copied().unwrap_or(padding_id as i32) as u32,
             Err(e) => {
                 log_warn(&format!("[stt] GPU readback to_vec FAILED: {:?}", e));
                 padding_id

@@ -56,3 +56,5 @@ opt-level = "s"
 # Patch cubecl-wgpu to cap workgroup size for WebGPU's 256 invocation limit
 [patch.crates-io]
 cubecl-wgpu = { path = "patches/cubecl-wgpu-0.9.0" }
+candle-core = { path = "../../candle/candle-core" }
+candle-nn = { path = "../../candle/candle-nn" }

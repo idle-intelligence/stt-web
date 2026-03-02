@@ -700,8 +700,18 @@ impl Q4ModelParts {
         dim: usize,
         device: &WgpuDevice,
     ) -> Tensor<Wgpu, 2> {
+        assert!(
+            dim.is_multiple_of(32),
+            "Q4_0 requires dim divisible by 32, got {dim}"
+        );
         let blocks_per_row = dim / 32;
         let bytes_per_row = blocks_per_row * 18;
+        let expected = vocab_size * bytes_per_row;
+        assert!(
+            q4_bytes.len() >= expected,
+            "Q4 embedding bytes too short: got {}, need {expected}",
+            q4_bytes.len()
+        );
         let mut data = vec![0.0f32; vocab_size * dim];
 
         for row in 0..vocab_size {

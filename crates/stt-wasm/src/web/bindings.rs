@@ -6,11 +6,12 @@
 #[cfg(target_family = "wasm")]
 use wasm_bindgen::prelude::*;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
 use burn::backend::wgpu::WgpuDevice;
+use wasm_bindgen_futures::{future_to_promise, JsFuture};
 
 use crate::gguf::Q4ModelLoader;
 use crate::model::SttModel;
@@ -174,13 +175,14 @@ pub struct SttEngine {
     device: WgpuDevice,
     shard_bufs: Vec<Vec<u8>>,
     metrics: SessionMetrics,
-    /// Tokens resolved asynchronously by `spawn_local` readback tasks.
-    /// Each entry is `(token_id, emits)`. Drained at the start of each
-    /// `feedAudio` call and on `flush`.
+    /// Token readbacks from spawn_local: (token_id, emits).
     token_sink: Rc<RefCell<Vec<(u32, bool)>>>,
-    /// Promises that resolve when each batch of `spawn_local` readbacks
-    /// completes. `flush()` awaits all of these before proceeding.
-    readback_promises: Vec<js_sys::Promise>,
+    /// Last spawn_local's promise, awaited by flush.
+    readback_promise: Option<js_sys::Promise>,
+    /// Limit-cycle signal from spawn_local → next feedAudio.
+    cycle_flag: Rc<Cell<bool>>,
+    /// Delay-period prediction history for limit-cycle detection (shared with spawn_local).
+    delay_prev_rc: Rc<RefCell<[u32; 2]>>,
 }
 
 #[cfg_attr(target_family = "wasm", wasm_bindgen)]
@@ -205,7 +207,9 @@ impl SttEngine {
             shard_bufs: Vec::new(),
             metrics: SessionMetrics::new(),
             token_sink: Rc::new(RefCell::new(Vec::new())),
-            readback_promises: Vec::new(),
+            readback_promise: None,
+            cycle_flag: Rc::new(Cell::new(false)),
+            delay_prev_rc: Rc::new(RefCell::new([u32::MAX; 2])),
         }
     }
 
@@ -288,18 +292,24 @@ impl SttEngine {
     /// Audio goes through: Mimi codec → STT transformer → text tokens → detokenize.
     /// Per-call timing is stored in metrics (retrieve via `getMetrics()`).
     ///
-    /// **Non-blocking GPU readback:** This method is synchronous — it never
-    /// awaits GPU buffer mapping. Instead, it:
-    /// 1. Drains tokens resolved asynchronously by previous calls' `spawn_local` tasks
-    /// 2. Runs Mimi encode (CPU) + STT forward pass (GPU dispatch)
-    /// 3. Fires `spawn_local` to read back the new argmax tensors in the background
-    /// 4. Returns text from step 1
-    ///
-    /// Text arrives one audio chunk late (~80ms). The pipeline never stalls
-    /// on the ~250ms `mapAsync` latency that Chrome/Dawn imposes.
+    /// **Non-blocking readback via spawn_local:** dispatches GPU work synchronously,
+    /// then spawns an async task to read back the argmax tensors. Text arrives
+    /// one chunk late (~80ms). The pipeline never stalls on desktop — Firefox's
+    /// 100ms mapAsync poll timer has zero impact since readback is fully decoupled.
     #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = feedAudio))]
     pub fn feed_audio(&mut self, samples: &[f32]) -> Result<String, JsError> {
         let t_start = now_ms();
+
+        // --- Step 0: Check limit-cycle flag from previous spawn_local ---
+        if self.cycle_flag.get() {
+            self.cycle_flag.set(false);
+            if let Some(stream) = self.stream.as_mut() {
+                stream.clear_gpu_autoregressive();
+            }
+        }
+
+        // --- Step 1: Drain token_sink (from previous spawn_local) ---
+        let drained: Vec<(u32, bool)> = std::mem::take(&mut *self.token_sink.borrow_mut());
 
         // Track first audio arrival for TTFB
         if !self.metrics.has_audio && !samples.is_empty() {
@@ -307,14 +317,13 @@ impl SttEngine {
             self.metrics.first_audio_ms = t_start;
         }
 
-        // --- Step 1: Drain tokens resolved by previous spawn_local tasks ---
-        let resolved = std::mem::take(&mut *self.token_sink.borrow_mut());
-        let text_tokens: Vec<u32> = resolved
+        let text_tokens: Vec<u32> = drained
             .iter()
-            .filter_map(|&(token, emits)| if emits { Some(token) } else { None })
+            .filter(|(_, emits)| *emits)
+            .map(|(token, _)| *token)
             .collect();
 
-        // Track TTFB from drained tokens
+        // Track TTFB
         for &token in &text_tokens {
             if !self.metrics.has_token
                 && token != self.config.text_padding_id
@@ -363,30 +372,57 @@ impl SttEngine {
 
         let t_stt_end = now_ms();
 
-        // --- Step 4: Fire-and-forget readback via spawn_local ---
-        let pending = stream.take_batch_pending();
-        if !pending.is_empty() {
-            let sink = self.token_sink.clone();
-            let padding_id = self.config.text_padding_id;
-
-            // Create a Promise so flush() can await completion
-            let mut resolve_fn: Option<js_sys::Function> = None;
-            let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-                resolve_fn = Some(resolve);
-            });
-            let resolve = resolve_fn.unwrap();
-            self.readback_promises.push(promise);
-
-            wasm_bindgen_futures::spawn_local(async move {
-                for frame in pending {
-                    let token = readback_argmax_free(frame.argmax, padding_id).await;
-                    sink.borrow_mut().push((token, frame.emits));
-                }
-                resolve.call0(&JsValue::NULL).ok();
-            });
-        }
+        // --- Step 4: Take pending frames for async readback ---
+        let pending_frames = stream.take_batch_pending();
 
         let t_end = now_ms();
+
+        // --- Step 5: Spawn async readback via future_to_promise ---
+        if !pending_frames.is_empty() {
+            let sink = Rc::clone(&self.token_sink);
+            let flag = Rc::clone(&self.cycle_flag);
+            let delay_prev = Rc::clone(&self.delay_prev_rc);
+            let padding_id = self.config.text_padding_id;
+            let prev_promise = self.readback_promise.take();
+
+            let promise = future_to_promise(async move {
+                // Await previous readback to maintain frame ordering
+                if let Some(prev) = prev_promise {
+                    let _ = JsFuture::from(prev).await;
+                }
+
+                for frame in pending_frames {
+                    let token = readback_argmax_free(frame.argmax, padding_id).await;
+
+                    // Q4 limit-cycle detection on non-emitting (delay) frames
+                    if !frame.emits {
+                        let mut dp = delay_prev.borrow_mut();
+                        let prev = *dp;
+                        *dp = [prev[1], token];
+                        if token != padding_id
+                            && token != 0
+                            && token == prev[0]
+                            && token != prev[1]
+                        {
+                            web_sys::console::warn_1(
+                                &format!(
+                                    "[stt] delay limit-cycle detected: {}↔{}, forcing padding",
+                                    prev[1], token,
+                                )
+                                .into(),
+                            );
+                            flag.set(true);
+                        }
+                    }
+
+                    sink.borrow_mut().push((token, frame.emits));
+                }
+
+                Ok(JsValue::UNDEFINED)
+            });
+
+            self.readback_promise = Some(promise);
+        }
 
         // Update metrics
         let mimi_ms = t_mimi_end - t_mimi_start;
@@ -398,7 +434,7 @@ impl SttEngine {
         self.metrics.total_stt_ms += stt_ms;
         self.metrics.total_ms += total_call_ms;
 
-        // Decode token IDs to text
+        // Decode drained tokens to text
         let text = if let Some(ref tok) = self.tokenizer {
             tok.decode(&text_tokens)
         } else {
@@ -433,30 +469,41 @@ impl SttEngine {
 
     /// Flush remaining text after end of speech.
     ///
-    /// Waits for all in-flight `spawn_local` readbacks to complete (blocking
-    /// is acceptable here — flush is end-of-speech, the ~250ms latency is fine),
-    /// then drains the token sink and runs the delay-pipeline drain.
+    /// Awaits the last spawn_local readback, drains the token sink, syncs the
+    /// GPU-resident text token back to CPU, then drains the delay pipeline
+    /// with zero-audio frames.
     #[cfg_attr(target_family = "wasm", wasm_bindgen)]
     pub async fn flush(&mut self) -> Result<String, JsError> {
-        // Wait for all in-flight readback promises
-        let promises = std::mem::take(&mut self.readback_promises);
-        if !promises.is_empty() {
-            let arr = js_sys::Array::new();
-            for p in &promises {
-                arr.push(p);
-            }
-            wasm_bindgen_futures::JsFuture::from(js_sys::Promise::all(&arr))
-                .await
-                .ok();
+        // 1. Await last spawn_local (ensures all readbacks complete)
+        if let Some(promise) = self.readback_promise.take() {
+            let _ = JsFuture::from(promise).await;
         }
 
-        // Drain all resolved tokens from spawn_local tasks
-        let resolved = std::mem::take(&mut *self.token_sink.borrow_mut());
-        let mut tokens: Vec<u32> = resolved
+        // 2. Drain token_sink → collect emitting tokens
+        let drained: Vec<(u32, bool)> = std::mem::take(&mut *self.token_sink.borrow_mut());
+        let mut tokens: Vec<u32> = drained
             .iter()
-            .filter_map(|&(token, emits)| if emits { Some(token) } else { None })
+            .filter(|(_, emits)| *emits)
+            .map(|(token, _)| *token)
             .collect();
 
+        // 3. Update last_text_token from last drained token (fallback if sync
+        //    can't read GPU argmax, e.g. after clear_gpu_autoregressive)
+        if let Some(&(last_token, _)) = drained.last() {
+            self.stream
+                .as_mut()
+                .ok_or_else(|| JsError::new("Stream not initialized."))?
+                .set_last_text_token(last_token);
+        }
+
+        // 4. Sync GPU-resident argmax → CPU (overwrites step 3 if available)
+        self.stream
+            .as_mut()
+            .ok_or_else(|| JsError::new("Stream not initialized."))?
+            .sync_last_text_token()
+            .await;
+
+        // 5. Flush delay pipeline (feeds zero-audio frames via old per-frame path)
         let model = self
             .model
             .as_ref()
@@ -465,15 +512,9 @@ impl SttEngine {
             .stream
             .as_mut()
             .ok_or_else(|| JsError::new("Stream not initialized."))?;
+        tokens.extend(stream.flush(model).await);
 
-        // Sync CPU-side last_text_token from GPU-resident argmax.
-        // flush() → feed_frame() uses the CPU token, not the GPU tensor.
-        stream.sync_last_text_token().await;
-
-        // Drain the delay pipeline (feeds zero-audio frames)
-        let flush_tokens = stream.flush(model).await;
-        tokens.extend(flush_tokens);
-
+        // 6. Decode all accumulated tokens
         let text = if let Some(ref tok) = self.tokenizer {
             tok.decode(&tokens)
         } else {
@@ -501,8 +542,11 @@ impl SttEngine {
             mimi.reset();
         }
         self.metrics.reset();
-        self.token_sink.borrow_mut().clear();
-        self.readback_promises.clear();
+        // Fresh Rcs — stale spawn_local closures write to orphaned Rcs (harmless)
+        self.token_sink = Rc::new(RefCell::new(Vec::new()));
+        self.readback_promise = None;
+        self.cycle_flag = Rc::new(Cell::new(false));
+        self.delay_prev_rc = Rc::new(RefCell::new([u32::MAX; 2]));
     }
 
     /// Run warmup passes to pre-compile WebGPU shader pipelines.
