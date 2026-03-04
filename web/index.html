@@ -395,6 +395,7 @@
             return new SttClient({
                 workerUrl: './worker.js',
                 audioProcessorUrl: './audio-processor.js',
+                vadThresholds: { positive: 0.7, negative: 0.35 },
                 onStatus: (text, ready, progress) => {
                     if (!isRecording && !isProcessingFile && text.startsWith('Processing')) return;
                     if (ready) {

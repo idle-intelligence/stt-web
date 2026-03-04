@@ -300,6 +300,30 @@ impl SttEngine {
         Ok(())
     }
 
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = setVadThresholds))]
+    pub fn set_vad_thresholds(&mut self, positive: f32, negative: f32) {
+        if let Some(ref mut vad) = self.vad {
+            vad.set_thresholds(positive, negative);
+            wasm_log(&format!("[vad] Thresholds set: positive={positive}, negative={negative}"));
+        }
+    }
+
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = setVadStartFrames))]
+    pub fn set_vad_start_frames(&mut self, n: usize) {
+        if let Some(ref mut vad) = self.vad {
+            vad.set_start_frames(n);
+            wasm_log(&format!("[vad] Start frames set: {n}"));
+        }
+    }
+
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = setVadEndFrames))]
+    pub fn set_vad_end_frames(&mut self, n: usize) {
+        if let Some(ref mut vad) = self.vad {
+            vad.set_end_frames(n);
+            wasm_log(&format!("[vad] End frames set: {n}"));
+        }
+    }
+
     #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = drainVadEvents))]
     pub fn drain_vad_events(&mut self) -> JsValue {
         let events: Vec<_> = std::mem::take(&mut self.vad_events);

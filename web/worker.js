@@ -238,6 +238,15 @@ async function handleLoad(config) {
         const vadBuf = await cachedFetch(vadUrl, 'Downloading VAD model');
         self.postMessage({ type: 'status', text: 'Loading VAD model...' });
         engine.loadVad(new Uint8Array(vadBuf));
+        if (config.vadThresholds) {
+            engine.setVadThresholds(config.vadThresholds.positive, config.vadThresholds.negative);
+        }
+        if (config.vadStartFrames != null) {
+            engine.setVadStartFrames(config.vadStartFrames);
+        }
+        if (config.vadEndFrames != null) {
+            engine.setVadEndFrames(config.vadEndFrames);
+        }
         logState('VAD model loaded');
     } catch (err) {
         console.warn('[worker] VAD load failed (non-fatal):', err.message);
@@ -278,7 +287,6 @@ async function handleAudio({ samples }) {
     // Drain VAD events
     const vadEvents = engine.drainVadEvents();
     for (const ev of vadEvents) {
-        console.log(`[worker] VAD: ${ev.event === 'speech_start' ? 'Beginning of Speech detected' : 'End of Speech detected'}`);
         self.postMessage({ type: 'vad', event: ev.event, time: ev.time });
     }
 

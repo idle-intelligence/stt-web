@@ -43,6 +43,9 @@ export class SttClient {
         this.shardList = options.shardList || null;
         this.mimiUrl = options.mimiUrl || null;
         this.tokenizerUrl = options.tokenizerUrl || null;
+        this.vadThresholds = options.vadThresholds || null;
+        this.vadStartFrames = options.vadStartFrames ?? null;
+        this.vadEndFrames = options.vadEndFrames ?? null;
 
         this.worker = null;
         this.audioContext = null;
@@ -88,6 +91,9 @@ export class SttClient {
             if (this.shardList) config.shardList = this.shardList;
             if (this.mimiUrl) config.mimiUrl = this.mimiUrl;
             if (this.tokenizerUrl) config.tokenizerUrl = this.tokenizerUrl;
+            if (this.vadThresholds) config.vadThresholds = this.vadThresholds;
+            if (this.vadStartFrames != null) config.vadStartFrames = this.vadStartFrames;
+            if (this.vadEndFrames != null) config.vadEndFrames = this.vadEndFrames;
             this.worker.postMessage({ type: 'load', config });
         });
     }
