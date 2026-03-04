@@ -70,6 +70,13 @@ async function drainQueue() {
                     tokenCount = 0;
                     handleReset();
                     break;
+                case 'set-vad-config':
+                    if (engine) {
+                        if (data.thresholds) engine.setVadThresholds(data.thresholds.positive, data.thresholds.negative);
+                        if (data.startFrames != null) engine.setVadStartFrames(data.startFrames);
+                        if (data.endFrames != null) engine.setVadEndFrames(data.endFrames);
+                    }
+                    break;
                 default:
                     console.warn('[worker] Unknown message type:', type);
             }

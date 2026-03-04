@@ -168,6 +168,13 @@ export class SttClient {
         // would be needed to fully solve this.
     }
 
+    /** Update VAD config at runtime. */
+    setVadConfig(config) {
+        if (this.worker) {
+            this.worker.postMessage({ type: 'set-vad-config', ...config });
+        }
+    }
+
     /** Stop recording and flush remaining text. */
     stopRecording() {
         if (!this._ready) {
