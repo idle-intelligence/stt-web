@@ -1,3 +1,5 @@
+/* @ts-self-types="./stt_wasm.d.ts" */
+
 /**
  * Browser-facing STT engine combining Mimi codec + STT transformer.
  *
@@ -166,6 +168,25 @@ export class SttEngine {
      */
     reset() {
         wasm.sttengine_reset(this.__wbg_ptr);
+    }
+    /**
+     * @param {number} n
+     */
+    setVadEndFrames(n) {
+        wasm.sttengine_setVadEndFrames(this.__wbg_ptr, n);
+    }
+    /**
+     * @param {number} n
+     */
+    setVadStartFrames(n) {
+        wasm.sttengine_setVadStartFrames(this.__wbg_ptr, n);
+    }
+    /**
+     * @param {number} positive
+     * @param {number} negative
+     */
+    setVadThresholds(positive, negative) {
+        wasm.sttengine_setVadThresholds(this.__wbg_ptr, positive, negative);
     }
     /**
      * Run warmup passes to pre-compile WebGPU shader pipelines.
