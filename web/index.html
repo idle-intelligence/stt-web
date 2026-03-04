@@ -310,7 +310,7 @@
                 <div class="metric-label">Frames/sec</div>
             </div>
             <div class="metric">
-                <div class="metric-value" id="metricRtf">—</div>
+                <div class="metric-value" id="metricTheoRtf">—</div>
                 <div class="metric-label">RTF</div>
             </div>
             <div class="metric">
@@ -351,19 +351,19 @@
         const metricsCard = document.getElementById('metricsCard');
         const metricTtfb = document.getElementById('metricTtfb');
         const metricFps = document.getElementById('metricFps');
-        const metricRtf = document.getElementById('metricRtf');
+        const metricTheoRtf = document.getElementById('metricTheoRtf');
         const metricFrameMs = document.getElementById('metricFrameMs');
         const metricMimiMs = document.getElementById('metricMimiMs');
         const metricSttMs = document.getElementById('metricSttMs');
+        let speechStartTime = null;
 
         function updateMetrics(data) {
             metricsCard.style.display = 'block';
-            if (data.ttfb != null && data.ttfb >= 0) metricTtfb.textContent = data.ttfb.toFixed(0);
             if (data.framesPerSec != null) metricFps.textContent = data.framesPerSec.toFixed(1);
-            if (data.rtf != null) metricRtf.textContent = data.rtf.toFixed(2);
             if (data.avgFrameMs != null) metricFrameMs.textContent = data.avgFrameMs.toFixed(1);
             if (data.mimiMs != null) metricMimiMs.textContent = data.mimiMs.toFixed(1);
             if (data.sttMs != null) metricSttMs.textContent = data.sttMs.toFixed(1);
+            if (data.avgFrameMs != null) metricTheoRtf.textContent = (data.avgFrameMs / 80).toFixed(2);
         }
 
         let client = null;
@@ -424,6 +424,12 @@
                         transcriptText += text;
                         transcriptTextEl.textContent = transcriptText;
                         transcriptEl.classList.remove('empty');
+                        // TTFB: time from VAD speech_start to first transcript text
+                        if (speechStartTime != null && metricTtfb.textContent === '—') {
+                            const ttfb = performance.now() - speechStartTime;
+                            metricTtfb.textContent = ttfb.toFixed(0);
+                            metricsCard.style.display = 'block';
+                        }
                     }
                     if (isFinal) {
                         if (transcriptText) transcriptText += ' ';
@@ -462,6 +468,20 @@
             updateStatus('error', 'WebGPU not supported. Use Chrome or Edge 113+.');
         } else {
             client = makeClient();
+            // VAD events come directly from the worker (not handled by SttClient)
+            const origInit = client.init.bind(client);
+            client.init = async function() {
+                await origInit();
+                client.worker.addEventListener('message', (e) => {
+                    if (e.data.type === 'vad') {
+                        const ev = e.data.event;
+                        console.log(`[vad] ${ev === 'speech_start' ? 'Beginning of Speech detected' : 'End of Speech detected'}`);
+                        if (ev === 'speech_start') {
+                            speechStartTime = performance.now();
+                        }
+                    }
+                });
+            };
             const cached = await isModelCached();
             if (cached) {
                 await initClient();
@@ -478,6 +498,8 @@
         recordBtn.addEventListener('click', async () => {
             if (!isRecording) {
                 try {
+                    speechStartTime = null;
+                    metricTtfb.textContent = '—';
                     await client.startRecording();
                     isRecording = true;
                     recordBtn.textContent = 'Stop Recording';
