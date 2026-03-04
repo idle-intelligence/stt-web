@@ -24,6 +24,7 @@ const MIME = {
     ".wav":  "audio/wav",
     ".css":  "text/css",
     ".bin":  "application/octet-stream",
+    ".safetensors": "application/octet-stream",
 };
 
 const server = createServer((req, res) => {
@@ -43,6 +44,8 @@ const server = createServer((req, res) => {
         filePath = join(ROOT, "crates/stt-wasm", pathname);
     } else if (pathname.startsWith("/mimi-pkg/")) {
         filePath = join(ROOT, "crates/mimi-wasm/pkg", pathname.replace("/mimi-pkg/", ""));
+    } else if (pathname.startsWith("/hf/")) {
+        filePath = join(ROOT, "..", pathname);
     } else {
         filePath = join(ROOT, "web", pathname);
     }

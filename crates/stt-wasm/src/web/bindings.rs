@@ -183,6 +183,8 @@ pub struct SttEngine {
     cycle_flag: Rc<Cell<bool>>,
     /// Delay-period prediction history for limit-cycle detection (shared with spawn_local).
     delay_prev_rc: Rc<RefCell<[u32; 2]>>,
+    vad: Option<vad_rs::VadDetector>,
+    vad_events: Vec<(String, f64)>,
 }
 
 #[cfg_attr(target_family = "wasm", wasm_bindgen)]
@@ -210,6 +212,8 @@ impl SttEngine {
             readback_promise: None,
             cycle_flag: Rc::new(Cell::new(false)),
             delay_prev_rc: Rc::new(RefCell::new([u32::MAX; 2])),
+            vad: None,
+            vad_events: Vec::new(),
         }
     }
 
@@ -286,6 +290,29 @@ impl SttEngine {
         Ok(())
     }
 
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = loadVad))]
+    pub fn load_vad(&mut self, data: &[u8]) -> Result<(), JsError> {
+        wasm_log(&format!("[vad] Loading VAD model ({} bytes)...", data.len()));
+        let silero = vad_rs::SileroVad::from_bytes(data)
+            .map_err(|e| JsError::new(&format!("Failed to load VAD: {e}")))?;
+        self.vad = Some(vad_rs::VadDetector::new(silero));
+        wasm_log("[vad] VAD model loaded");
+        Ok(())
+    }
+
+    #[cfg_attr(target_family = "wasm", wasm_bindgen(js_name = drainVadEvents))]
+    pub fn drain_vad_events(&mut self) -> JsValue {
+        let events: Vec<_> = std::mem::take(&mut self.vad_events);
+        let arr = js_sys::Array::new();
+        for (name, time) in events {
+            let obj = js_sys::Object::new();
+            js_sys::Reflect::set(&obj, &"event".into(), &name.into()).ok();
+            js_sys::Reflect::set(&obj, &"time".into(), &JsValue::from_f64(time)).ok();
+            arr.push(&obj);
+        }
+        arr.into()
+    }
+
     /// Feed PCM audio samples (f32, 24kHz mono for Mimi).
     ///
     /// Returns decoded transcript text if any new tokens were produced.
@@ -331,6 +358,19 @@ impl SttEngine {
             {
                 self.metrics.has_token = true;
                 self.metrics.first_token_ms = now_ms();
+            }
+        }
+
+        // --- VAD processing (non-fatal) ---
+        if let Some(ref mut vad) = self.vad {
+            let vad_events = vad.feed_audio(samples);
+            let t = now_ms();
+            for ev in vad_events {
+                let name = match ev {
+                    vad_rs::VadEvent::SpeechStart => "speech_start",
+                    vad_rs::VadEvent::SpeechEnd => "speech_end",
+                };
+                self.vad_events.push((name.to_string(), t));
             }
         }
 
@@ -541,6 +581,10 @@ impl SttEngine {
         if let Some(mimi) = &mut self.mimi {
             mimi.reset();
         }
+        if let Some(ref mut vad) = self.vad {
+            vad.reset();
+        }
+        self.vad_events.clear();
         self.metrics.reset();
         // Fresh Rcs — stale spawn_local closures write to orphaned Rcs (harmless)
         self.token_sink = Rc::new(RefCell::new(Vec::new()));

@@ -30,6 +30,8 @@ cli = ["clap", "indicatif"]
 hub = ["hf-hub"]
 
 [dependencies]
+vad-rs = { path = "../../../vad-rs" }
+
 # Burn ML framework
 burn = { workspace = true }
 cubecl = { workspace = true }
