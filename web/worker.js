@@ -232,7 +232,7 @@ async function handleLoad(config) {
     engine.loadTokenizer(new Uint8Array(tokBuf));
 
     // 7b. Load VAD model (optional — non-fatal if missing).
-    const vadUrl = config.vadUrl ?? '/hf/silero-vad-v5.safetensors';
+    const vadUrl = config.vadUrl ?? 'https://huggingface.co/idle-intelligence/silero-vad-v5-safetensors/resolve/main/silero-vad-v5.safetensors';
     try {
         logState(`Loading VAD from ${vadUrl}...`);
         const vadBuf = await cachedFetch(vadUrl, 'Downloading VAD model');
