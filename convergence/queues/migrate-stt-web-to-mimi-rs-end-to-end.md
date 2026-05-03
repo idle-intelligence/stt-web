@@ -57,7 +57,7 @@ Three triggers only — Discovery (necessary unanticipated work), Split (task is
 - [x] **1. Commit decode path in mimi-rs** (single-shot, ~45m). In `/Users/tc/Code/idle-intelligence/mimi-rs` on branch `feat/optional-encoder`: review the ~119 uncommitted lines (`VectorQuantizer::decode`, `ResidualVectorQuantizer::decode_n`, `SplitResidualVectorQuantizer::decode`, `MimiModel::dequantize_codes`/`decode_from_codes`/`decode_from_codes_n`), add round-trip unit tests (encode a known tensor → decode → check shape and approximate reconstruction), run `cargo clippy` clean, commit. Commit message prefix `[migrate-stt-web-to-mimi-rs-end-to-end]`.
     **Convergence criteria**: `git -C /Users/tc/Code/idle-intelligence/mimi-rs status` shows clean working tree on `feat/optional-encoder`; `cargo test` in mimi-rs passes including the new round-trip test; `cargo clippy` exits 0.
 
-- [ ] **2. Merge feat/optional-encoder → main in mimi-rs** (single-shot, ~10m). In `/Users/tc/Code/idle-intelligence/mimi-rs`, merge `feat/optional-encoder` into `main` (fast-forward or merge commit). No version tag required.
+- [x] **2. Merge feat/optional-encoder → main in mimi-rs** (single-shot, ~10m). In `/Users/tc/Code/idle-intelligence/mimi-rs`, merge `feat/optional-encoder` into `main` (fast-forward or merge commit). No version tag required.
     **Convergence criteria**: `git -C /Users/tc/Code/idle-intelligence/mimi-rs log --oneline main | head -1` shows the decode-path commit at HEAD of `main`; `git -C /Users/tc/Code/idle-intelligence/mimi-rs branch --merged main` includes `feat/optional-encoder`.
 
 ### Phase 2 — stt-web dependency update
