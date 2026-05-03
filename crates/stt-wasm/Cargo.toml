@@ -37,9 +37,7 @@ burn = { workspace = true }
 cubecl = { workspace = true }
 
 # Mimi audio codec (candle-based, shared with tts-web)
-# Using local path for development; switch to git after mimi-rs PR merges:
-# mimi-rs = { git = "https://github.com/idle-intelligence/mimi-rs.git" }
-mimi-rs = { path = "../../../mimi-rs" }
+mimi-rs = { git = "file:///Users/tc/Code/idle-intelligence/mimi-rs", branch = "main" }
 candle-core = "0.9"
 candle-nn = "0.9"
 safetensors = "0.4"
