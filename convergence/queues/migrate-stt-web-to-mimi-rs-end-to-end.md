@@ -65,7 +65,7 @@ Three triggers only — Discovery (necessary unanticipated work), Split (task is
 - [x] **3. Update stt-web to git dep on mimi-rs main** (single-shot, ~20m). In `stt-web/Cargo.toml` (and any workspace member that references mimi-rs), replace the `path = "../../../mimi-rs"` dep with a `git` dep pointing at the local repo's `main` HEAD (use `git = "file:///Users/tc/Code/idle-intelligence/mimi-rs", branch = "main"`). Run `cargo build --features "wgpu,cli"` and `cargo clippy --features "wgpu,cli" -- -D warnings` to confirm native build is clean. Commit.
     **Convergence criteria**: `grep -r 'path.*mimi-rs' /Users/tc/Code/idle-intelligence/stt-web/Cargo.toml` returns empty; `cargo build --features "wgpu,cli"` exits 0; `cargo clippy --features "wgpu,cli" -- -D warnings` exits 0.
 
-- [ ] **4. Verify WASM build** (single-shot, ~20m). Run `wasm-pack build crates/stt-wasm --target web --no-default-features --features wasm` from the stt-web repo root. Confirm the new decode symbols compiled in (they're in the library, not the WASM bindings, so they just need to not break the build).
+- [x] **4. Verify WASM build** (single-shot, ~20m). Run `wasm-pack build crates/stt-wasm --target web --no-default-features --features wasm` from the stt-web repo root. Confirm the new decode symbols compiled in (they're in the library, not the WASM bindings, so they just need to not break the build).
     **Convergence criteria**: `wasm-pack build crates/stt-wasm --target web --no-default-features --features wasm` exits 0; the resulting `pkg/` contains a `.wasm` file.
 
 ### Phase 3 — Verification
