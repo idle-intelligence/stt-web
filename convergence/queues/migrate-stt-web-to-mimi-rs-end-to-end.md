@@ -1,4 +1,4 @@
-STATUS: DRAFT — pending owner review
+STATUS: ACTIVE — started 2026-05-03T00:00:00Z
 
 # migrate-stt-web-to-mimi-rs-end-to-end
 
@@ -54,7 +54,7 @@ Three triggers only — Discovery (necessary unanticipated work), Split (task is
 
 ### Phase 1 — mimi-rs decode path
 
-- [ ] **1. Commit decode path in mimi-rs** (single-shot, ~45m). In `/Users/tc/Code/idle-intelligence/mimi-rs` on branch `feat/optional-encoder`: review the ~119 uncommitted lines (`VectorQuantizer::decode`, `ResidualVectorQuantizer::decode_n`, `SplitResidualVectorQuantizer::decode`, `MimiModel::dequantize_codes`/`decode_from_codes`/`decode_from_codes_n`), add round-trip unit tests (encode a known tensor → decode → check shape and approximate reconstruction), run `cargo clippy` clean, commit. Commit message prefix `[migrate-stt-web-to-mimi-rs-end-to-end]`.
+- [x] **1. Commit decode path in mimi-rs** (single-shot, ~45m). In `/Users/tc/Code/idle-intelligence/mimi-rs` on branch `feat/optional-encoder`: review the ~119 uncommitted lines (`VectorQuantizer::decode`, `ResidualVectorQuantizer::decode_n`, `SplitResidualVectorQuantizer::decode`, `MimiModel::dequantize_codes`/`decode_from_codes`/`decode_from_codes_n`), add round-trip unit tests (encode a known tensor → decode → check shape and approximate reconstruction), run `cargo clippy` clean, commit. Commit message prefix `[migrate-stt-web-to-mimi-rs-end-to-end]`.
     **Convergence criteria**: `git -C /Users/tc/Code/idle-intelligence/mimi-rs status` shows clean working tree on `feat/optional-encoder`; `cargo test` in mimi-rs passes including the new round-trip test; `cargo clippy` exits 0.
 
 - [ ] **2. Merge feat/optional-encoder → main in mimi-rs** (single-shot, ~10m). In `/Users/tc/Code/idle-intelligence/mimi-rs`, merge `feat/optional-encoder` into `main` (fast-forward or merge commit). No version tag required.
@@ -71,10 +71,13 @@ Three triggers only — Discovery (necessary unanticipated work), Split (task is
 ### Phase 3 — Verification
 
 - [ ] **5. Run stt-web tests** (single-shot, ~15m). Run `cargo test --features "wgpu" -- --test-threads=1` from stt-web repo root. All tests must pass.
-    **Convergence criteria**: `cargo test --features "wgpu" -- --test-threads=1` exits 0 with no test failures.
+    **Convergence criteria**: `cargo test --features "wgpu" -- --test-threads=1` exits 0 with no test failures. Additionally grep the output for `"Skipping: GGUF not found"` — if ALL model-dependent e2e tests were silently skipped, flag this task as inconclusive (not done) and document which model files are missing; do not mark [x] on a hollow pass.
+
+- [ ] **5b. Capture post-migration RTF** (single-shot, ~15m). Run the full WAV e2e test with output captured: `cargo test -p stt-wasm --features wgpu --test e2e_wav test_e2e_wav_to_text -- --nocapture 2>&1 | tee /tmp/rtf-post-migration.txt`. Extract the "Total RTF:" line. Verify: (a) "E2E WAV TEST PASSED" appears in output, confirming transcript was non-empty; (b) the extracted RTF value is ≤ 1.05 (pipeline runs at real-time or better; native baseline is ~0.875×, so ≤1.05 gives 5% headroom above real-time). Write the captured RTF number to a step report under `convergence/steps/`. If model files are absent, skip this task with explicit documentation of which files are missing — do NOT mark [x] silently.
+    **Convergence criteria**: `/tmp/rtf-post-migration.txt` contains "E2E WAV TEST PASSED" AND contains "Total RTF:" with a numeric value ≤ 1.05; OR model files are confirmed absent and the skip is explicitly documented with file paths.
 
 - [ ] **Acceptance check** (iterate, criterion-driven). Independently verify the run's acceptance criterion by direct observation of the goal-as-stated — NOT by re-checking the conjunction of upstream tasks. If this fails while upstream tasks are [x], the decomposition was incomplete; use Discovery / Remesh to address the gap and retry.
-    **Acceptance criterion**: HUMAN-DEFINED — fill before kickoff. The browser verification step (load the demo page, record or play a known reference clip, confirm expected transcript appears) requires a human at the browser. Before starting the loop, the owner must specify: (a) the reference audio clip path, (b) the expected transcript string, and (c) whether they want to run the browser test themselves (marking this task done manually) or if it can be deferred. Automated sub-tasks can verify: `cargo test` green, WASM build clean, git dep in Cargo.toml, mimi-rs main has the decode-path commit — these are necessary but not sufficient for the stated acceptance criterion.
+    **Acceptance criterion**: The following must all be true — (1) **Autonomously verifiable**: `cargo test` exits 0 with no failures; `test_e2e_wav_to_text` confirms transcript non-empty and RTF ≤ 1.05×; `grep -r 'path.*mimi-rs' stt-web/Cargo.toml` returns empty; `git -C mimi-rs log --oneline main | head -1` shows the decode-path commit. (2) **Human-verified**: load the demo page (`node web/serve.mjs`), play a known reference clip (e.g. `web/test-loona.wav`), confirm the transcript begins with "in the heart of an ancient forest". The loop can mark part (1) done autonomously; part (2) requires the owner to run the browser test and mark this task [x] manually. If model files are absent, document that and defer the RTF check — do not claim acceptance without it.
 
 - [ ] **Global review** (single-shot, adversarial, criterion-blind). Spawn a fresh Agent (sonnet, no prior context) with `/Users/tc/Code/nordcoop/convergence/prompts/global-review.md`. Inputs: RUN_NAME=`migrate-stt-web-to-mimi-rs-end-to-end`, REPO_ROOT=`/Users/tc/Code/idle-intelligence/stt-web`, GOAL=run goal as stated above (verbatim), CONV_HOME=`/Users/tc/Code/nordcoop/convergence`. The reviewer reads the goal and the acceptance evidence — never the criterion text — and tries to falsify the run's claimed success. On FAIL: the reviewer appends a Discovery block (re-fix + re-acceptance + re-global-review) to this queue and the loop continues. On PASS: proceed to Self-review.
 
