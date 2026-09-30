@@ -30,7 +30,7 @@ cli = ["clap", "indicatif"]
 hub = ["hf-hub"]
 
 [dependencies]
-vad-rs = { path = "../../../vad-rs" }
+vad-rs = { git = "https://github.com/idle-intelligence/vad-rs", rev = "a785d39" }
 
 # Burn ML framework
 burn = { workspace = true }
