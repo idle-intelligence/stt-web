@@ -250,10 +250,7 @@ fn test_q4_matmul_larger_realistic() {
     let inputs: Vec<Vec<f32>> = (0..3)
         .map(|seed| {
             (0..k)
-                .map(|i| {
-                    let x = ((i * (seed * 7 + 3) + seed * 11 + 7) % 200) as f32 / 100.0 - 1.0;
-                    x
-                })
+                .map(|i| ((i * (seed * 7 + 3) + seed * 11 + 7) % 200) as f32 / 100.0 - 1.0)
                 .collect()
         })
         .collect();
