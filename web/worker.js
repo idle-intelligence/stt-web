@@ -19,6 +19,11 @@
 // HuggingFace model repository (default source for all weights)
 const HF_BASE = 'https://huggingface.co/idle-intelligence/stt-1b-en_fr-q4_0-webgpu/resolve/main';
 
+// Cache-bust tag for the wasm module URL below; scripts/build.sh rewrites
+// this to ENGINE_BUILD on every deploy so a rebuild is never served from an
+// older build's cache.
+const ENGINE_BUILD = "dev";
+
 let engine = null;
 let sttWasm = null;
 let totalSamples = 0;
@@ -195,8 +200,8 @@ async function handleLoad(config) {
 
     // 1. Import WASM module.
     self.postMessage({ type: 'status', text: 'Loading WASM module...' });
-    const wasmJsUrl = base ? (base + '/pkg/stt_wasm.js') : new URL('../pkg/stt_wasm.js', import.meta.url).href;
-    const wasmBgUrl = base ? (base + '/pkg/stt_wasm_bg.wasm') : new URL('../pkg/stt_wasm_bg.wasm', import.meta.url).href;
+    const wasmJsUrl = (base ? (base + '/pkg/stt_wasm.js') : new URL('../pkg/stt_wasm.js', import.meta.url).href) + '?v=' + ENGINE_BUILD;
+    const wasmBgUrl = (base ? (base + '/pkg/stt_wasm_bg.wasm') : new URL('../pkg/stt_wasm_bg.wasm', import.meta.url).href) + '?v=' + ENGINE_BUILD;
     sttWasm = await import(wasmJsUrl);
     await sttWasm.default(wasmBgUrl);
 
