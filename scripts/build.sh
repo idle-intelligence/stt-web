@@ -40,7 +40,7 @@ echo "==> Assembling _site"
 rm -rf _site
 mkdir -p _site/pkg _site/web
 cp crates/stt-wasm/pkg/stt_wasm.js crates/stt-wasm/pkg/stt_wasm_bg.wasm crates/stt-wasm/pkg/package.json _site/pkg/
-cp web/index.html web/worker.js web/audio-processor.js web/stt-client.js web/tokenizer.js \
+cp web/index.html web/worker.js web/audio-processor.js web/stt-client.js \
    web/apple-touch-icon.png web/favicon.ico web/test-bria.wav _site/web/
 
 # --- Rewrite the ?v= build tag to ENGINE_BUILD on the wasm loading URL ---
