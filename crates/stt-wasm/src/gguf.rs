@@ -905,12 +905,16 @@ impl<R: Read + Seek> Q4ModelLoader<R> {
         let bytes = self.reader.tensor_data(name)?;
         let data: Vec<f32> = match info.dtype() {
             GgmlDtype::F32 => bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect(),
             GgmlDtype::F16 => bytes
-                .chunks_exact(2)
-                .map(|b| f16_to_f32(u16::from_le_bytes([b[0], b[1]])))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| f16_to_f32(u16::from_le_bytes(*b)))
                 .collect(),
             GgmlDtype::Q4_0 => bail!("Cannot load Q4_0 tensor '{name}' as norm weight"),
         };
