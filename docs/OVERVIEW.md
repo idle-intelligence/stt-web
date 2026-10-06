@@ -138,7 +138,10 @@ stt-web/
 ├── scripts/
 │   ├── quantize.py            # convert safetensors → Q4 GGUF
 │   ├── eval.py                # WER evaluation script
-│   └── gen-cert.sh            # self-signed cert for local HTTPS dev
+│   ├── strip_mimi.py          # encoder-only f16 Mimi weights
+│   ├── download-assets.sh     # fetch Mimi weights + tokenizer for local dev
+│   ├── build.sh                # assemble _site/ for Pages
+│   └── serve.py                # local server with COOP/COEP headers
 ├── tests/
 │   └── reference/             # test audio files + expected transcripts
 │                              # (Rust integration tests live under crates/*/tests/)

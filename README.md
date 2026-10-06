@@ -17,7 +17,7 @@ Microphone → AudioWorklet (24kHz mono) → Mimi codec (WASM/CPU) → STT trans
 ## Requirements
 
 - Chrome 113+ or Edge 113+ (WebGPU required)
-- HTTPS (required for WebGPU; dev server uses self-signed cert)
+- `localhost` is a secure context already, so no cert is needed for local dev
 
 ## Quick Start
 
@@ -29,11 +29,9 @@ python scripts/quantize.py
 wasm-pack build crates/mimi-wasm --target web --features wasm
 wasm-pack build crates/stt-wasm --target web --no-default-features --features wasm
 
-# 3. Generate self-signed cert for HTTPS dev server
-scripts/gen-cert.sh
-
-# 4. Start dev server
-bun web/serve.mjs
+# 3. Assemble the site and start a local server
+scripts/build.sh
+python3 scripts/serve.py
 ```
 
 ## Architecture
