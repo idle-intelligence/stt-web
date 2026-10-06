@@ -20,7 +20,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 echo "==> Building stt-wasm (wasm feature) for ENGINE_BUILD=$ENGINE_BUILD"
-RUSTFLAGS="--remap-path-prefix=$HOME=/home" \
+CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+RUSTFLAGS="--remap-path-prefix=$HOME=/home --remap-path-prefix=$CARGO_HOME_DIR=/cargo" \
   wasm-pack build crates/stt-wasm --target web --release --no-default-features --features wasm
 
 WASM="crates/stt-wasm/pkg/stt_wasm_bg.wasm"
