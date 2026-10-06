@@ -31,6 +31,7 @@ test_*.wav
 # WASM build output
 pkg/
 crates/*/pkg/
+/_site/
 
 # Convergence harness symlinks (machine-local absolute paths)
 convergence/prompts
