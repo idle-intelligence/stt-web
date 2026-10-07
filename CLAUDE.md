@@ -31,9 +31,11 @@ cargo test --features "wgpu" -- --test-threads=1
 python scripts/quantize.py   # safetensors → Q4 GGUF
 python scripts/eval.py       # WER comparison
 
-# Dev server (HTTPS required for WebGPU)
-# Generate self-signed cert first: scripts/gen-cert.sh
-bun web/serve.mjs
+# Build + assemble the deployed site (bumps the ?v= build tag on the wasm loading URL)
+ENGINE_BUILD=<tag> scripts/build.sh
+
+# Dev server (serves _site/, localhost is already a secure context — no cert needed)
+python3 scripts/serve.py
 ```
 
 ## Repo Structure
@@ -53,7 +55,7 @@ web/
   worker.js           # Web Worker: loads WASM, orchestrates pipeline
   audio-processor.js  # AudioWorklet: mic → 24kHz mono PCM chunks
   stt-client.js       # optional JS embedding API
-scripts/              # quantize.py, eval.py, gen-cert.sh
+scripts/              # quantize.py, eval.py, build.sh, serve.py
 tests/reference/      # shared test fixtures (wav, tokens, transcripts)
 ```
 
@@ -69,7 +71,7 @@ tests/reference/      # shared test fixtures (wav, tokens, transcripts)
 2. **2GB single ArrayBuffer limit in WASM.** Use `ShardedCursor` (Vec<Vec<u8>>) for multi-shard GGUF reading.
 3. **4GB WASM address space.** Use two-phase weight loading: parse GGUF → drop reader → finalize tensors on GPU.
 4. **WebGPU workgroup size limit: 256 invocations.** Apply the cubecl-wgpu patch from `refs/voxtral-mini-realtime-rs/patches/cubecl-wgpu-0.9.0/`.
-5. **WebGPU requires HTTPS.** Dev server must use self-signed cert for localhost.
+5. **WebGPU requires a secure context.** `localhost` already qualifies, so no cert is needed for local dev; a real deploy needs HTTPS.
 6. **All inference in a Web Worker.** Main thread only does UI and mic capture.
 7. **Model weights fetched at runtime** from HuggingFace, cached via browser Cache API. Never committed to repo.
 8. **Q4 WGSL shaders:** Use naive kernel for WASM (tiled kernel is native-only). See `refs/voxtral-mini-realtime-rs/src/gguf/shader_naive.wgsl`.
