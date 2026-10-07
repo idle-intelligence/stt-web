@@ -37,6 +37,19 @@ fn device() -> WgpuDevice {
     WgpuDevice::default()
 }
 
+// Burn/cubecl panics inside the wgpu runtime when there is no adapter (CI
+// runners have no GPU), so probe for one with wgpu directly before
+// touching anything Burn-related. cubecl's AutoGraphicsApi only ever tries
+// the platform's primary backend (Vulkan/Metal/Dx12/WebGPU, never the GL
+// software fallback), so the probe is restricted to PRIMARY too.
+fn has_wgpu_adapter() -> bool {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::PRIMARY,
+        ..Default::default()
+    });
+    pollster::block_on(instance.request_adapter(&Default::default())).is_ok()
+}
+
 /// Convert f32 to f16 bits (IEEE 754 half-precision).
 fn f32_to_f16_bits(val: f32) -> u16 {
     let bits = val.to_bits();
@@ -99,6 +112,10 @@ fn quantize_matrix(data: &[f32], rows: usize, cols: usize) -> Vec<u8> {
 
 #[test]
 fn test_q4_matmul_identity_like() {
+    if !has_wgpu_adapter() {
+        eprintln!("skipped: no GPU adapter");
+        return;
+    }
     // Simple test: weight matrix is near-identity (diagonal-like pattern)
     // Input should pass through approximately unchanged
     let device = device();
@@ -156,6 +173,10 @@ fn test_q4_matmul_identity_like() {
 
 #[test]
 fn test_q4_matmul_different_inputs() {
+    if !has_wgpu_adapter() {
+        eprintln!("skipped: no GPU adapter");
+        return;
+    }
     // Test that different inputs produce different outputs
     let device = device();
     let n = 128;
@@ -230,6 +251,10 @@ fn test_q4_matmul_different_inputs() {
 
 #[test]
 fn test_q4_matmul_larger_realistic() {
+    if !has_wgpu_adapter() {
+        eprintln!("skipped: no GPU adapter");
+        return;
+    }
     // Test with dimensions closer to the actual model (2048 → 6144)
     let device = device();
     let n = 256; // reduced from 6144 for speed
@@ -305,6 +330,10 @@ fn test_q4_matmul_larger_realistic() {
 
 #[test]
 fn test_embedding_sum_then_q4_matmul() {
+    if !has_wgpu_adapter() {
+        eprintln!("skipped: no GPU adapter");
+        return;
+    }
     // Mimics the actual model forward pass:
     // 1. Create 32 embedding rows from from_data() (simulating EmbeddingStore)
     // 2. Sum them all + a text embedding

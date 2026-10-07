@@ -76,4 +76,8 @@ wgpu = { workspace = true, optional = true }
 [dev-dependencies]
 approx = "0.5"
 pollster = "0.4"
+# Pinned to the exact version already in Cargo.lock (via burn-wgpu): probes
+# for a wgpu adapter in q4_matmul.rs so GPU tests skip where there is none
+# (CI runners), without pulling in any new versions.
+wgpu = "=26.0.1"
 
