@@ -326,9 +326,16 @@ impl SttStream {
         // Feed zero-audio frames to drain the delay pipeline.
         // Use feed_frame (old path) since flush is not perf-critical
         // and needs per-frame readback for the text tokens.
+        //
+        // This drains flush_drain_frames() (ceil(audio_delay_seconds *
+        // frame_rate), 7 frames for stt-1b-en_fr), matching the reference's
+        // n_suffix_chunks in ref_infer.py. This is NOT text_delay (6):
+        // text_delay only governs when emission starts, not how many
+        // trailing frames the reference appends to let the delayed text
+        // stream catch up with the last real audio frame.
         let zero_audio = vec![0u32; self.config.num_codebooks];
 
-        for _ in 0..self.config.text_delay {
+        for _ in 0..self.config.flush_drain_frames() {
             if let Some(token) = self.feed_frame(&zero_audio, model).await {
                 tokens.push(token);
             }
