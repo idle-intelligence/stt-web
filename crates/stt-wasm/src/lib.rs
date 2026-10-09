@@ -45,6 +45,12 @@ pub struct SttConfig {
     pub audio_vocab_size: usize,
     /// Delayed-streams text offset in frames.
     pub text_delay: usize,
+    /// Audio delay in seconds used by the reference to compute how many
+    /// trailing silence frames to feed at end-of-turn (`audio_delay_seconds`
+    /// in the model config, independent of `text_delay`).
+    pub audio_delay_seconds: f64,
+    /// Mimi codec frame rate in Hz.
+    pub frame_rate_hz: f64,
     /// RoPE base frequency.
     pub rope_theta: f64,
     /// Maximum sequence length.
@@ -55,6 +61,18 @@ pub struct SttConfig {
     pub text_padding_id: u32,
     /// Text start token ID (fed on first step; = text_in_vocab_size - 1).
     pub text_start_token: u32,
+}
+
+impl SttConfig {
+    /// Number of trailing silence frames to feed at end-of-turn, matching the
+    /// reference's `n_suffix_chunks = ceil(audio_delay_seconds * frame_rate)`.
+    /// This is distinct from `text_delay`: `text_delay` governs *when* text
+    /// starts emitting mid-stream (`step_idx >= text_delay`), while this
+    /// governs how long the delay pipeline must be drained after the last
+    /// real audio frame so the model's lookahead gets to run out.
+    pub fn flush_drain_frames(&self) -> usize {
+        (self.audio_delay_seconds * self.frame_rate_hz).ceil() as usize
+    }
 }
 
 impl Default for SttConfig {
@@ -71,6 +89,8 @@ impl Default for SttConfig {
             num_codebooks: 32,
             audio_vocab_size: 2049,
             text_delay: 6,
+            audio_delay_seconds: 0.5,
+            frame_rate_hz: 12.5,
             rope_theta: 100000.0,
             max_seq_len: 4096,
             sliding_window: 750,
