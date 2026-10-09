@@ -16,6 +16,82 @@ use burn::tensor::{Int, Tensor};
 use crate::model::{LayerCaches, SttModel};
 use crate::SttConfig;
 
+/// Detects Q4-quantization limit cycles in the decoded token stream and
+/// resolves them to padding, so a stuck autoregressive loop never reaches
+/// the user as repeated garbage text.
+///
+/// Two patterns, neither seen in a full-precision reference trace (checked
+/// against moshi 0.2.11 f32 on an 18s/234-step clip: zero runs of 2 or more
+/// identical non-padding tokens on consecutive frames):
+/// - Period-1: the same non-padding token repeating for `RUN_THRESHOLD` or
+///   more consecutive frames (the "hmm" x10-22 stuck-argmax failure).
+/// - Period-2: an A/B/A oscillation (e.g. 6646<->260), forced to padding as
+///   soon as the pattern repeats past its first two frames.
+///
+/// Legitimate repeated words ("no no no", "very very") never trip either
+/// pattern: each instance of the word occupies one emission frame, with
+/// several padding frames covering the rest of the word's audio span, so
+/// repeats are never on consecutive frames.
+///
+/// Used identically for the delay-period guard (already existed before this
+/// type) and the post-delay emission region (previously unchecked).
+pub struct CycleGuard {
+    /// Last two *raw* (pre-correction) tokens seen, oldest first.
+    prev: [u32; 2],
+    /// Raw token currently repeating, and its consecutive run length.
+    run_token: u32,
+    run_len: usize,
+}
+
+impl CycleGuard {
+    /// Consecutive identical non-padding frames before forcing padding.
+    const RUN_THRESHOLD: usize = 3;
+
+    pub fn new() -> Self {
+        Self {
+            prev: [u32::MAX; 2],
+            run_token: u32::MAX,
+            run_len: 0,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    /// Feed the raw predicted token for this frame.
+    ///
+    /// Returns `(resolved_token, cycle_detected)`: `resolved_token` is
+    /// `token` unless a cycle was detected, in which case it is
+    /// `padding_id`. History is always updated from the raw token, so a
+    /// persisting cycle keeps being detected even while we force padding
+    /// into the output/feedback.
+    pub fn check(&mut self, token: u32, padding_id: u32) -> (u32, bool) {
+        let real = token != padding_id && token != 0;
+
+        if real && token == self.run_token {
+            self.run_len += 1;
+        } else {
+            self.run_token = token;
+            self.run_len = if real { 1 } else { 0 };
+        }
+
+        let period1 = real && self.run_len >= Self::RUN_THRESHOLD;
+        let period2 = real && token == self.prev[0] && token != self.prev[1];
+        let cycle = period1 || period2;
+
+        self.prev = [self.prev[1], token];
+
+        (if cycle { padding_id } else { token }, cycle)
+    }
+}
+
+impl Default for CycleGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Streaming STT decoder implementing delayed-streams logic.
 pub struct SttStream {
     config: SttConfig,
@@ -34,10 +110,8 @@ pub struct SttStream {
     /// Frames are appended during `submit_frame_gpu()` and read back all
     /// at once via `resolve_batch()`.
     batch_pending: Vec<PendingFrame>,
-    /// Last two predictions during the delay period, for limit-cycle detection.
-    /// Q4 quantization can cause degenerate oscillations (e.g. 260↔263) that
-    /// the F32 reference model doesn't exhibit.
-    delay_prev: [u32; 2],
+    /// Limit-cycle guard, run on every frame (delay AND emission region).
+    cycle_guard: CycleGuard,
 }
 
 /// A submitted but not-yet-resolved frame result.
@@ -59,7 +133,7 @@ impl SttStream {
             cache,
             pending_argmax: None,
             batch_pending: Vec::new(),
-            delay_prev: [u32::MAX; 2],
+            cycle_guard: CycleGuard::new(),
         }
     }
 
@@ -147,26 +221,18 @@ impl SttStream {
         let mut tokens = Vec::new();
 
         for frame in pending {
-            let token = self.readback_argmax(frame.argmax).await;
-            self.last_text_token = token;
+            let raw = self.readback_argmax(frame.argmax).await;
+            let (resolved, cycle) = self.cycle_guard.check(raw, self.config.text_padding_id);
+            self.last_text_token = resolved;
+            if cycle {
+                Self::log(&format!(
+                    "[stt] limit-cycle detected (emits={}): token {}, forcing padding",
+                    frame.emits, raw,
+                ));
+                self.last_text_argmax = None;
+            }
             if frame.emits {
-                tokens.push(token);
-            } else {
-                // Q4 limit-cycle detection (mirrors resolve_pending_as_token)
-                let prev = self.delay_prev;
-                self.delay_prev = [prev[1], token];
-                if token != self.config.text_padding_id
-                    && token != 0
-                    && token == prev[0]
-                    && token != prev[1]
-                {
-                    Self::log(&format!(
-                        "[stt] delay limit-cycle detected: {}↔{}, forcing padding",
-                        prev[1], token,
-                    ));
-                    self.last_text_token = self.config.text_padding_id;
-                    self.last_text_argmax = None;
-                }
+                tokens.push(resolved);
             }
         }
 
@@ -230,37 +296,31 @@ impl SttStream {
     /// warmup period.
     pub async fn resolve_pending_as_token(&mut self) -> Option<u32> {
         let pending = self.pending_argmax.take()?;
-        let token = self.readback_argmax(pending.argmax).await;
+        let raw = self.readback_argmax(pending.argmax).await;
+
+        // Delay period: feed back the model's own prediction, matching the
+        // reference PyTorch/Candle implementations. The model expects to see
+        // its previous prediction as text input (autoregressive), even during
+        // the delay when tokens aren't emitted to the user.
+        //
+        // The same Q4 limit-cycle guard runs here and in the emission region
+        // below (`pending.emits`): Q4 quantization can produce degenerate
+        // oscillations or stuck repeats (e.g. 260<->263, or the same token
+        // for many consecutive frames) that the F32 reference never
+        // exhibits. Detected cycles are forced to padding, both for what we
+        // emit and for what we feed back.
+        let (resolved, cycle) = self.cycle_guard.check(raw, self.config.text_padding_id);
+        if cycle {
+            Self::log(&format!(
+                "[stt] limit-cycle detected (emits={}): token {}, forcing padding",
+                pending.emits, raw,
+            ));
+        }
+        self.last_text_token = resolved;
 
         if pending.emits {
-            self.last_text_token = token;
-            Some(token)
+            Some(resolved)
         } else {
-            // Delay period: feed back the model's own prediction, matching the
-            // reference PyTorch/Candle implementations. The model expects to see
-            // its previous prediction as text input (autoregressive), even during
-            // the delay when tokens aren't emitted to the user.
-            //
-            // Q4 quantization can cause degenerate limit cycles (e.g. 260↔263)
-            // that the F32 reference model doesn't exhibit. Detect oscillation
-            // and break it by forcing padding for one frame.
-            let prev = self.delay_prev;
-            self.delay_prev = [prev[1], token];
-
-            if token != self.config.text_padding_id
-                && token != 0
-                && token == prev[0]
-                && token != prev[1]
-            {
-                // A↔B oscillation detected (e.g. 260→263→260): break the cycle.
-                Self::log(&format!(
-                    "[stt] delay limit-cycle detected: {}↔{}, forcing padding",
-                    prev[1], token,
-                ));
-                self.last_text_token = self.config.text_padding_id;
-            } else {
-                self.last_text_token = token;
-            }
             None
         }
     }
@@ -327,9 +387,9 @@ impl SttStream {
         // Use feed_frame (old path) since flush is not perf-critical
         // and needs per-frame readback for the text tokens.
         //
-        // This drains flush_drain_frames() (ceil(audio_delay_seconds *
+        // This drains `flush_drain_frames()` (ceil(audio_delay_seconds *
         // frame_rate), 7 frames for stt-1b-en_fr), matching the reference's
-        // n_suffix_chunks in ref_infer.py. This is NOT text_delay (6):
+        // `n_suffix_chunks` in ref_infer.py. This is NOT `text_delay` (6):
         // text_delay only governs when emission starts, not how many
         // trailing frames the reference appends to let the delayed text
         // stream catch up with the last real audio frame.
@@ -351,7 +411,7 @@ impl SttStream {
         self.last_text_argmax = None;
         self.pending_argmax = None;
         self.batch_pending.clear();
-        self.delay_prev = [u32::MAX; 2];
+        self.cycle_guard.reset();
         self.cache.reset();
     }
 
@@ -364,7 +424,7 @@ impl SttStream {
         self.last_text_argmax = None;
         self.pending_argmax = None;
         self.batch_pending.clear();
-        self.delay_prev = [u32::MAX; 2];
+        self.cycle_guard.reset();
         self.cache.reset_keep_buffers();
     }
 }

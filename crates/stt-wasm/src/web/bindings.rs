@@ -15,7 +15,7 @@ use wasm_bindgen_futures::{future_to_promise, JsFuture};
 
 use crate::gguf::Q4ModelLoader;
 use crate::model::SttModel;
-use crate::stream::{readback_argmax_free, SttStream};
+use crate::stream::{readback_argmax_free, CycleGuard, SttStream};
 use crate::tokenizer::SpmDecoder;
 use crate::SttConfig;
 
@@ -181,8 +181,9 @@ pub struct SttEngine {
     readback_promise: Option<js_sys::Promise>,
     /// Limit-cycle signal from spawn_local → next feedAudio.
     cycle_flag: Rc<Cell<bool>>,
-    /// Delay-period prediction history for limit-cycle detection (shared with spawn_local).
-    delay_prev_rc: Rc<RefCell<[u32; 2]>>,
+    /// Limit-cycle guard, run on every frame (delay AND emission region),
+    /// shared with the spawn_local readback closure.
+    cycle_guard_rc: Rc<RefCell<CycleGuard>>,
     vad: Option<vad_rs::VadDetector>,
     vad_events: Vec<(String, f64)>,
 }
@@ -211,7 +212,7 @@ impl SttEngine {
             token_sink: Rc::new(RefCell::new(Vec::new())),
             readback_promise: None,
             cycle_flag: Rc::new(Cell::new(false)),
-            delay_prev_rc: Rc::new(RefCell::new([u32::MAX; 2])),
+            cycle_guard_rc: Rc::new(RefCell::new(CycleGuard::new())),
             vad: None,
             vad_events: Vec::new(),
         }
@@ -445,7 +446,7 @@ impl SttEngine {
         if !pending_frames.is_empty() {
             let sink = Rc::clone(&self.token_sink);
             let flag = Rc::clone(&self.cycle_flag);
-            let delay_prev = Rc::clone(&self.delay_prev_rc);
+            let cycle_guard = Rc::clone(&self.cycle_guard_rc);
             let padding_id = self.config.text_padding_id;
             let prev_promise = self.readback_promise.take();
 
@@ -456,30 +457,25 @@ impl SttEngine {
                 }
 
                 for frame in pending_frames {
-                    let token = readback_argmax_free(frame.argmax, padding_id).await;
+                    let raw = readback_argmax_free(frame.argmax, padding_id).await;
 
-                    // Q4 limit-cycle detection on non-emitting (delay) frames
-                    if !frame.emits {
-                        let mut dp = delay_prev.borrow_mut();
-                        let prev = *dp;
-                        *dp = [prev[1], token];
-                        if token != padding_id
-                            && token != 0
-                            && token == prev[0]
-                            && token != prev[1]
-                        {
-                            web_sys::console::warn_1(
-                                &format!(
-                                    "[stt] delay limit-cycle detected: {}↔{}, forcing padding",
-                                    prev[1], token,
-                                )
-                                .into(),
-                            );
-                            flag.set(true);
-                        }
+                    // Q4 limit-cycle detection, on both delay AND emission
+                    // frames: emitted tokens were previously fed back
+                    // unchecked, letting a stuck argmax reach the user as
+                    // repeated garbage text.
+                    let (resolved, cycle) = cycle_guard.borrow_mut().check(raw, padding_id);
+                    if cycle {
+                        web_sys::console::warn_1(
+                            &format!(
+                                "[stt] limit-cycle detected (emits={}): token {}, forcing padding",
+                                frame.emits, raw,
+                            )
+                            .into(),
+                        );
+                        flag.set(true);
                     }
 
-                    sink.borrow_mut().push((token, frame.emits));
+                    sink.borrow_mut().push((resolved, frame.emits));
                 }
 
                 Ok(JsValue::UNDEFINED)
@@ -614,7 +610,7 @@ impl SttEngine {
         self.token_sink = Rc::new(RefCell::new(Vec::new()));
         self.readback_promise = None;
         self.cycle_flag = Rc::new(Cell::new(false));
-        self.delay_prev_rc = Rc::new(RefCell::new([u32::MAX; 2]));
+        self.cycle_guard_rc = Rc::new(RefCell::new(CycleGuard::new()));
     }
 
     /// Run warmup passes to pre-compile WebGPU shader pipelines.
