@@ -393,7 +393,7 @@
 
         function makeClient() {
             return new SttClient({
-                workerUrl: './worker.js',
+                workerUrl: './worker.js?v=2',
                 audioProcessorUrl: './audio-processor.js',
                 vadThresholds: { positive: 0.7, negative: 0.35 },
                 onStatus: (text, ready, progress) => {
@@ -438,8 +438,8 @@
                         if (rtf) {
                             const procTime = (rtf.audioDuration * rtf.total).toFixed(1);
                             const speedup = (1 / rtf.total).toFixed(1);
-                            const faster = rtf.total < 1.0 ? ` — ${speedup}x faster than real-time` : '';
-                            rtfInfoEl.textContent = `${rtf.audioDuration.toFixed(1)}s audio processed in ${procTime}s (RTF: ${rtf.total.toFixed(2)}x)${faster}`;
+                            const faster = rtf.total < 1.0 ? `, ${speedup}x faster than real-time` : '';
+                            rtfInfoEl.textContent = `${rtf.audioDuration.toFixed(1)}s of audio, ${procTime}s of compute (RTF ${rtf.total.toFixed(2)})${faster}`;
                             rtfInfoEl.style.display = 'block';
                         }
                     } else {
