@@ -422,7 +422,9 @@
                 onTranscript: (text, isFinal, rtf) => {
                     const cursor = document.getElementById('streamingCursor');
                     if (text) {
-                        transcriptText += text;
+                        // A new turn starts on its own line, without the model's leading space.
+                        const atLineStart = transcriptText === '' || transcriptText.endsWith('\n');
+                        transcriptText += atLineStart ? text.trimStart() : text;
                         transcriptTextEl.textContent = transcriptText;
                         transcriptEl.classList.remove('empty');
                         // TTFB: time from VAD speech_start to first transcript text
@@ -433,7 +435,7 @@
                         }
                     }
                     if (isFinal) {
-                        if (transcriptText) transcriptText += ' ';
+                        if (transcriptText && !transcriptText.endsWith('\n')) transcriptText += '\n';
                         if (cursor) cursor.style.display = 'none';
                         if (rtf) {
                             const procTime = (rtf.audioDuration * rtf.total).toFixed(1);
