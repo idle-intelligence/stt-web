@@ -472,7 +472,19 @@ impl SttEngine {
                             )
                             .into(),
                         );
-                        flag.set(true);
+                        // Only break the GPU-resident autoregressive feedback
+                        // for delay-period cycles (padding is the expected
+                        // input there). Clearing it on an emission-region
+                        // cycle forces an out-of-distribution padding token
+                        // into mid-utterance feedback; confirmed on a long
+                        // clip that this empties out a transcript that
+                        // otherwise comes through fine. For emission frames
+                        // only the displayed token (`resolved`, pushed
+                        // below) is corrected; the raw GPU argmax keeps
+                        // feeding forward unchanged.
+                        if !frame.emits {
+                            flag.set(true);
+                        }
                     }
 
                     sink.borrow_mut().push((resolved, frame.emits));

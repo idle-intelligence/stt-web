@@ -223,16 +223,32 @@ impl SttStream {
         for frame in pending {
             let raw = self.readback_argmax(frame.argmax).await;
             let (resolved, cycle) = self.cycle_guard.check(raw, self.config.text_padding_id);
-            self.last_text_token = resolved;
             if cycle {
                 Self::log(&format!(
                     "[stt] limit-cycle detected (emits={}): token {}, forcing padding",
                     frame.emits, raw,
                 ));
-                self.last_text_argmax = None;
             }
             if frame.emits {
+                // Emission region: never break the autoregressive feedback
+                // with an out-of-distribution padding token mid-utterance
+                // (the model is trained to see padding only during the
+                // initial delay). Only the displayed token is corrected;
+                // feedback keeps the model's own raw prediction so it can
+                // recover on its own on the next frame. Confirmed on a long
+                // clip in the browser: forcing padding into mid-utterance
+                // feedback here emptied the rest of the transcript that
+                // otherwise came through fine.
+                self.last_text_token = raw;
                 tokens.push(resolved);
+            } else {
+                // Delay region: padding is the expected input, so forcing
+                // it for feedback matches the trained distribution and
+                // cleanly breaks a real cycle.
+                self.last_text_token = resolved;
+                if cycle {
+                    self.last_text_argmax = None;
+                }
             }
         }
 
@@ -307,8 +323,7 @@ impl SttStream {
         // below (`pending.emits`): Q4 quantization can produce degenerate
         // oscillations or stuck repeats (e.g. 260<->263, or the same token
         // for many consecutive frames) that the F32 reference never
-        // exhibits. Detected cycles are forced to padding, both for what we
-        // emit and for what we feed back.
+        // exhibits.
         let (resolved, cycle) = self.cycle_guard.check(raw, self.config.text_padding_id);
         if cycle {
             Self::log(&format!(
@@ -316,11 +331,22 @@ impl SttStream {
                 pending.emits, raw,
             ));
         }
-        self.last_text_token = resolved;
 
         if pending.emits {
+            // Emission region: correct only what's displayed. Feeding back
+            // padding mid-utterance is out-of-distribution (the model is
+            // trained to see padding only during the initial delay) and
+            // empirically makes things worse, not better: on a long clip in
+            // the browser, forcing padding into feedback here emptied out a
+            // transcript that otherwise came through fine. Let the model's
+            // own raw prediction keep feeding forward so it can recover.
+            self.last_text_token = raw;
             Some(resolved)
         } else {
+            // Delay region: padding is the expected input, so forcing it
+            // for feedback matches the trained distribution and cleanly
+            // breaks a real cycle.
+            self.last_text_token = resolved;
             None
         }
     }
