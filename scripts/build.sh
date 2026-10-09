@@ -21,8 +21,11 @@ cd "$REPO_ROOT"
 
 echo "==> Building stt-wasm (wasm feature) for ENGINE_BUILD=$ENGINE_BUILD"
 CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
-RUSTFLAGS="--remap-path-prefix=$HOME=/home --remap-path-prefix=$CARGO_HOME_DIR=/cargo" \
-  wasm-pack build crates/stt-wasm --target web --release --no-default-features --features wasm
+# Passed via --config (not the RUSTFLAGS env var) so cargo merges this array
+# with .cargo/config.toml's target.wasm32-unknown-unknown.rustflags (e.g.
+# +simd128) instead of replacing it.
+wasm-pack build crates/stt-wasm --target web --release --no-default-features --features wasm \
+  --config "target.wasm32-unknown-unknown.rustflags=[\"--remap-path-prefix=$HOME=/home\", \"--remap-path-prefix=$CARGO_HOME_DIR=/cargo\"]"
 
 WASM="crates/stt-wasm/pkg/stt_wasm_bg.wasm"
 
