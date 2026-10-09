@@ -1,0 +1,128 @@
+[
+  {
+    "file": "joke.wav",
+    "expected": "Hello, can you tell me a joke about yourself"
+  },
+  {
+    "file": "joke.wav",
+    "lead_s": 0.3,
+    "trail_s": 0.0,
+    "expected": "Hello, can you tell me a joke about yourself"
+  },
+  {
+    "file": "joke.wav",
+    "lead_s": 0.3,
+    "trail_s": 2.0,
+    "expected": "Hello, can you tell me a joke about yourself"
+  },
+  {
+    "file": "joke.wav",
+    "lead_s": 0.3,
+    "trail_s": 5.0,
+    "expected": "Hello, can you tell me a joke about yourself"
+  },
+  {
+    "file": "joke.wav",
+    "lead_s": 3.0,
+    "trail_s": 0.0,
+    "expected": "Hello, can you tell me a joke about yourself"
+  },
+  {
+    "file": "joke.wav",
+    "lead_s": 3.0,
+    "trail_s": 2.0,
+    "expected": "Hello, can you tell me a joke about yourself"
+  },
+  {
+    "file": "joke.wav",
+    "lead_s": 3.0,
+    "trail_s": 5.0,
+    "expected": "Hello, can you tell me a joke about yourself"
+  },
+  {
+    "file": "joke.wav",
+    "lead_s": 6.0,
+    "trail_s": 0.0,
+    "expected": "Hello, can you tell me a joke about yourself"
+  },
+  {
+    "file": "joke.wav",
+    "lead_s": 6.0,
+    "trail_s": 2.0,
+    "expected": "Hello, can you tell me a joke about yourself"
+  },
+  {
+    "file": "joke.wav",
+    "lead_s": 6.0,
+    "trail_s": 5.0,
+    "expected": "Hello, can you tell me a joke about yourself"
+  },
+  {
+    "file": "joke.wav",
+    "lead_s": 10.0,
+    "trail_s": 0.0,
+    "expected": "Hello, can you tell me a joke about yourself"
+  },
+  {
+    "file": "joke.wav",
+    "lead_s": 10.0,
+    "trail_s": 2.0,
+    "expected": "Hello, can you tell me a joke about yourself"
+  },
+  {
+    "file": "joke.wav",
+    "lead_s": 10.0,
+    "trail_s": 5.0,
+    "expected": "Hello, can you tell me a joke about yourself"
+  },
+  {
+    "file": "demo-2.wav",
+    "expected": "Why is that funny?"
+  },
+  {
+    "file": "demo-2.wav",
+    "lead_s": 0.0,
+    "trail_s": 2.0,
+    "expected": "Why is that funny?"
+  },
+  {
+    "file": "demo-1-vera.wav",
+    "expected": "Hello, can you tell me a joke about yourself?"
+  },
+  {
+    "file": "demo-2-vera.wav",
+    "expected": "That's pretty funny. Can you explain why?"
+  },
+  {
+    "file": "demo-3-vera.wav",
+    "expected": "Now tell me one about cats."
+  },
+  {
+    "file": "en-alba-oneword.wav",
+    "expected": ""
+  },
+  {
+    "file": "en-alba-short.wav",
+    "expected": "Can you read that back to me?"
+  },
+  {
+    "file": "en-cosette-med.wav",
+    "expected": "think we should go to the park this weekend if the weather holds."
+  },
+  {
+    "file": "en-javert-long.wav",
+    "expected": "the quick brown fox jumps over the lazy dog while the autumn leaves drift slowly across the quiet morning street and somewhere in the distance a train whistle echoes through the valley carrying with it the promise of a long journey that has only just begun for the travelers waiting patiently at the station platform under the gray october sky watching the clock tick toward departure"
+  },
+  {
+    "file": "en-marius-med.wav",
+    "expected": "What time is the meeting? Tomorrow afternoon."
+  },
+  {
+    "file": "fr-eponine-med.wav",
+    "expected": "Je pense que nous devrions partir tôt demain matin pour éviter la circulation."
+  },
+  {
+    "file": "fr-estelle-short.wav",
+    "expected": "Bonjour, comment allez-vous"
+  }
+]
