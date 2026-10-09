@@ -355,8 +355,11 @@ async function handleStop() {
     const avgMimiMs = m.total_frames > 0 ? m.mimi_encode_ms / m.total_frames : 0;
     const avgSttMs = m.total_frames > 0 ? m.stt_forward_ms / m.total_frames : 0;
     const avgFrameMs = m.total_frames > 0 ? m.total_ms / m.total_frames : 0;
+    // Real-time factor from compute: average per-frame processing time over
+    // the 80 ms each Mimi frame covers. Wall-clock time would only measure how
+    // fast audio was fed in (about 1.0 for a live mic).
     const rtf = {
-        total: totalTime / audioDuration,
+        total: avgFrameMs / 80,
         audioDuration,
     };
     logState(`Done: ${audioDuration.toFixed(1)}s audio, ${audioChunkCount} chunks, ${m.total_frames} frames, ${tokenCount} tokens, RTF=${rtf.total.toFixed(3)}, avg Mimi=${avgMimiMs.toFixed(1)}ms STT=${avgSttMs.toFixed(1)}ms frame=${avgFrameMs.toFixed(1)}ms`);
