@@ -68,4 +68,8 @@ if [ "$COUNT" -ne 1 ]; then
     exit 1
 fi
 
+# --- Target features: the wasm keeps SIMD ---
+echo "==> Checking wasm target features"
+python3 scripts/check_wasm_features.py "$WASM" +simd128
+
 echo "==> Wrote _site"
