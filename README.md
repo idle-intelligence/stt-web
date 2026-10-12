@@ -34,6 +34,20 @@ scripts/build.sh
 python3 scripts/serve.py
 ```
 
+## Development
+
+CI (`.github/workflows/pages.yml`) runs, on the toolchain pinned in `rust-toolchain.toml`:
+
+```bash
+cargo test -p stt-wasm --release     # non-GPU tests only; parity gates need model files
+cargo clippy --workspace --all-targets -- -D warnings
+ENGINE_BUILD=<tag> scripts/build.sh  # builds the wasm package and assembles _site/
+```
+
+`scripts/build.sh` needs `wasm-pack` and a `wasm-bindgen-cli` whose version matches the one in `Cargo.lock`. It rewrites the `?v=` build tag on the wasm loading URL in `web/worker.js` to `ENGINE_BUILD` (CI passes the commit sha, local builds default to `dev`). Pass a new tag on every real deploy, otherwise browsers keep running the cached module.
+
+`python3 scripts/serve.py` serves `_site/` on localhost, which counts as a secure context for WebGPU.
+
 ## Architecture
 
 - **Mimi codec** (`crates/mimi-wasm/`): SEANet encoder + transformer + RVQ quantizer. Runs on CPU via ndarray. Converts 24kHz mono PCM → 32 codebook tokens per frame at 12.5Hz.
