@@ -25,18 +25,28 @@ Microphone → AudioWorklet (24kHz mono) → Mimi codec (WASM/CPU) → STT trans
 # 1. Quantize model weights (requires Python + PyTorch)
 python scripts/quantize.py
 
-# 2. Build WASM packages
-wasm-pack build crates/mimi-wasm --target web --features wasm
-wasm-pack build crates/stt-wasm --target web --no-default-features --features wasm
-
-# 3. Assemble the site and start a local server
+# 2. Build the wasm package, assemble the site and start a local server
 scripts/build.sh
 python3 scripts/serve.py
 ```
 
+## Development
+
+CI (`.github/workflows/pages.yml`) runs, on the toolchain pinned in `rust-toolchain.toml`:
+
+```bash
+cargo test -p stt-wasm --release     # non-GPU tests only; parity gates need model files
+cargo clippy --workspace --all-targets -- -D warnings
+ENGINE_BUILD=<tag> scripts/build.sh  # builds the wasm package and assembles _site/
+```
+
+`scripts/build.sh` needs `wasm-pack` and a `wasm-bindgen-cli` whose version matches the one in `Cargo.lock`. It rewrites the `?v=` build tag on the wasm loading URL in `web/worker.js` to `ENGINE_BUILD` (CI passes the commit sha, local builds default to `dev`). Pass a new tag on every real deploy, otherwise browsers keep running the cached module.
+
+`python3 scripts/serve.py` serves `_site/` on localhost, which counts as a secure context for WebGPU.
+
 ## Architecture
 
-- **Mimi codec** (`crates/mimi-wasm/`): SEANet encoder + transformer + RVQ quantizer. Runs on CPU via ndarray. Converts 24kHz mono PCM → 32 codebook tokens per frame at 12.5Hz.
+- **Mimi codec** ([mimi-rs](https://github.com/idle-intelligence/mimi-rs), candle, shared with tts-web), compiled into the stt-wasm package: SEANet encoder + transformer + RVQ quantizer. Runs on CPU. Converts 24kHz mono PCM → 32 codebook tokens per frame at 12.5Hz.
 - **STT transformer** (`crates/stt-wasm/`): 16-layer decoder-only transformer with Q4-quantized weights. Runs on GPU via Burn + wgpu. Predicts text tokens from audio tokens.
 - **Web UI** (`web/`): AudioWorklet captures mic at 24kHz, Web Worker orchestrates pipeline, SentencePiece decoder produces text.
 
