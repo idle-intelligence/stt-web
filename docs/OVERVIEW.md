@@ -116,7 +116,6 @@ The project produces two things:
 ### 2. Code repository
 ```
 stt-web/
-├── CLAUDE.md                  # project context for Claude Code agents
 ├── Cargo.toml                 # workspace: mimi-wasm + stt-wasm crates
 ├── crates/
 │   ├── mimi-wasm/             # Mimi codec compiled to WASM
