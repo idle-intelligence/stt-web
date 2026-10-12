@@ -25,11 +25,7 @@ Microphone → AudioWorklet (24kHz mono) → Mimi codec (WASM/CPU) → STT trans
 # 1. Quantize model weights (requires Python + PyTorch)
 python scripts/quantize.py
 
-# 2. Build WASM packages
-wasm-pack build crates/mimi-wasm --target web --features wasm
-wasm-pack build crates/stt-wasm --target web --no-default-features --features wasm
-
-# 3. Assemble the site and start a local server
+# 2. Build the wasm package, assemble the site and start a local server
 scripts/build.sh
 python3 scripts/serve.py
 ```
@@ -50,7 +46,7 @@ ENGINE_BUILD=<tag> scripts/build.sh  # builds the wasm package and assembles _si
 
 ## Architecture
 
-- **Mimi codec** (`crates/mimi-wasm/`): SEANet encoder + transformer + RVQ quantizer. Runs on CPU via ndarray. Converts 24kHz mono PCM → 32 codebook tokens per frame at 12.5Hz.
+- **Mimi codec** ([mimi-rs](https://github.com/idle-intelligence/mimi-rs), candle, shared with tts-web), compiled into the stt-wasm package: SEANet encoder + transformer + RVQ quantizer. Runs on CPU. Converts 24kHz mono PCM → 32 codebook tokens per frame at 12.5Hz.
 - **STT transformer** (`crates/stt-wasm/`): 16-layer decoder-only transformer with Q4-quantized weights. Runs on GPU via Burn + wgpu. Predicts text tokens from audio tokens.
 - **Web UI** (`web/`): AudioWorklet captures mic at 24kHz, Web Worker orchestrates pipeline, SentencePiece decoder produces text.
 
